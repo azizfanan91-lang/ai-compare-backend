@@ -2,12 +2,12 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 
-const authRoutes = require('./routes/authRoutes');
-const chatRoutes = require('./routes/chatRoutes');
+const authRoutes = require('./authRoutes');
+const chatRoutes = require('./chatRoutes');
 
 const app = express();
 
-app.use(cors()); // كيسمح للـ frontend (اللي فـ Netlify) يتصل بهاد السيرفر
+app.use(cors());
 app.use(express.json());
 
 app.use('/api/auth', authRoutes);
