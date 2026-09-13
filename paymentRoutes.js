@@ -98,4 +98,49 @@ router.get('/my-subscription', requireAuth, (req, res) => {
   res.json(user || { is_premium: false, paypal_subscription_id: null });
 });
 
+// Endpoint مؤقت باش نصاوبو Product+Plan عند PayPal بلا Shell
+router.get('/setup-plan', async (req, res) => {
+  if (req.query.secret !== process.env.SETUP_SECRET) {
+    return res.status(403).json({ error: 'ماعندكش الحق' });
+  }
+  try {
+    const accessToken = await getAccessToken();
+
+    const productRes = await fetch('https://api-m.paypal.com/v1/catalogs/products', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Azizart AI Compare Premium',
+        description: 'اشتراك شهري بلا حدود',
+        type: 'SERVICE',
+        category: 'SOFTWARE'
+      })
+    });
+    const product = await productRes.json();
+    if (!product.id) return res.status(500).json({ error: 'فشل صنع Product', details: product });
+
+    const planRes = await fetch('https://api-m.paypal.com/v1/billing/plans', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        product_id: product.id,
+        name: 'اشتراك شهري - Premium',
+        billing_cycles: [{
+          frequency: { interval_unit: 'MONTH', interval_count: 1 },
+          tenure_type: 'REGULAR',
+          sequence: 1,
+          total_cycles: 0,
+          pricing_scheme: { fixed_price: { value: '10.00', currency_code: 'USD' } }
+        }],
+        payment_preferences: { auto_bill_outstanding: true, payment_failure_threshold: 2 }
+      })
+    });
+    const plan = await planRes.json();
+    if (!plan.id) return res.status(500).json({ error: 'فشل صنع Plan', details: plan });
+
+    res.json({ success: true, productId: product.id, planId: plan.id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 module.exports = router;
