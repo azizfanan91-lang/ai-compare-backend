@@ -168,3 +168,18 @@ router.get('/debug-paypal', async (req, res) => {
     const tokenData = await tokenRes.json();
 
     res.json({
+      httpStatus: tokenRes.status,
+      clientIdLength: clientId.length,
+      clientIdStart: clientId.substring(0, 6),
+      clientIdEnd: clientId.substring(clientId.length - 6),
+      secretLength: clientSecret.length,
+      secretStart: clientSecret.substring(0, 4),
+      secretEnd: clientSecret.substring(clientSecret.length - 4),
+      paypalResponse: tokenData
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+module.exports = router;
