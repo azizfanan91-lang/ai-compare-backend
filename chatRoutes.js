@@ -1,4 +1,4 @@
-// ظ‡ط§ط¯ ط§ظ„ظ€ route ظ‡ظˆ ط§ظ„ظ‚ظ„ط¨ ط¯ظٹط§ظ„ ط§ظ„طھط·ط¨ظٹظ‚
+// هاد الـ route هو القلب ديال التطبيق
 
 const express = require('express');
 const db = require('./database');
@@ -6,27 +6,34 @@ const { requireAuth } = require('./authMiddleware');
 
 const router = express.Router();
 
-const DAILY_FREE_LIMIT = parseInt(process.env.DAILY_FREE_LIMIT || '5', 10);
+// فترة التجربة المجانية بالأيام (بدل الحد اليومي ديال 5 أسئلة)
+const TRIAL_DAYS = parseInt(process.env.TRIAL_DAYS || '7', 10);
 
-function getTodayString() {
-  return new Date().toISOString().split('T')[0];
+// كيحسب شحال باقي من التجربة المجانية للمستخدم
+function getTrialStatus(createdAt) {
+  const createdDate = new Date(createdAt + 'Z'); // SQLite كيخزن UTC بلا Z، كنزيدوها باش نتأكدو
+  const now = new Date();
+  const diffMs = now - createdDate;
+  const diffDays = diffMs / (1000 * 60 * 60 * 24);
+  const daysLeft = Math.max(0, TRIAL_DAYS - diffDays);
+  return {
+    inTrial: diffDays < TRIAL_DAYS,
+    daysLeft: Math.ceil(daysLeft)
+  };
 }
 
 router.get('/usage', requireAuth, (req, res) => {
-  const user = db.prepare('SELECT is_premium FROM users WHERE id = ?').get(req.userId);
-  const today = getTodayString();
-  const row = db.prepare(
-    'SELECT count FROM usage_log WHERE user_id = ? AND date = ?'
-  ).get(req.userId, today);
-
-  const used = row ? row.count : 0;
+  const user = db.prepare('SELECT is_premium, created_at FROM users WHERE id = ?').get(req.userId);
   const isPremium = !!user.is_premium;
+  const trial = getTrialStatus(user.created_at);
 
   res.json({
     is_premium: isPremium,
-    used_today: used,
-    daily_limit: isPremium ? null : DAILY_FREE_LIMIT,
-    remaining: isPremium ? null : Math.max(0, DAILY_FREE_LIMIT - used)
+    in_trial: !isPremium && trial.inTrial,
+    trial_days_left: !isPremium ? trial.daysLeft : null,
+    trial_total_days: TRIAL_DAYS,
+    // unlimited إلى كان مشترك أو مازال فـ التجربة، وإلا خاصو يشترك
+    unlimited: isPremium || trial.inTrial
   });
 });
 
@@ -34,25 +41,19 @@ router.post('/chat', requireAuth, async (req, res) => {
   const { model, prompt } = req.body;
 
   if (!model || !prompt) {
-    return res.status(400).json({ error: 'ط®ط§طµ model ظˆ prompt' });
+    return res.status(400).json({ error: 'خاص model و prompt' });
   }
 
-  const user = db.prepare('SELECT is_premium FROM users WHERE id = ?').get(req.userId);
+  const user = db.prepare('SELECT is_premium, created_at FROM users WHERE id = ?').get(req.userId);
   const isPremium = !!user.is_premium;
-  const today = getTodayString();
+  const trial = getTrialStatus(user.created_at);
+  const hasAccess = isPremium || trial.inTrial;
 
-  if (!isPremium) {
-    const row = db.prepare(
-      'SELECT count FROM usage_log WHERE user_id = ? AND date = ?'
-    ).get(req.userId, today);
-    const used = row ? row.count : 0;
-
-    if (used >= DAILY_FREE_LIMIT) {
-      return res.status(429).json({
-        error: 'ظˆطµظ„طھظٹ ظ„ظ„ط­ط¯ ط§ظ„ظٹظˆظ…ظٹ ط§ظ„ظ…ط¬ط§ظ†ظٹ (' + DAILY_FREE_LIMIT + ' ط£ط³ط¦ظ„ط©). ط§ط´طھط±ظƒ ط¨ط§ط´ طھظƒظ…ظ„ ط¨ظ„ط§ ط­ط¯ظˆط¯.',
-        limit_reached: true
-      });
-    }
+  if (!hasAccess) {
+    return res.status(429).json({
+      error: 'خلصات التجربة المجانية ديالك (' + TRIAL_DAYS + ' أيام). اشترك باش تكمل تستعمل الموقع بلا حدود.',
+      trial_ended: true
+    });
   }
 
   try {
@@ -75,18 +76,18 @@ router.post('/chat', requireAuth, async (req, res) => {
       return res.status(502).json({ error: data.error.message });
     }
 
-    if (!isPremium) {
-      db.prepare(`
-        INSERT INTO usage_log (user_id, date, count) VALUES (?, ?, 1)
-        ON CONFLICT(user_id, date) DO UPDATE SET count = count + 1
-      `).run(req.userId, today);
-    }
+    // كنسجلو الاستعمال فقط للإحصائيات، بلا ما نحسبو عليه فالمنع
+    const today = new Date().toISOString().split('T')[0];
+    db.prepare(`
+      INSERT INTO usage_log (user_id, date, count) VALUES (?, ?, 1)
+      ON CONFLICT(user_id, date) DO UPDATE SET count = count + 1
+    `).run(req.userId, today);
 
-    const text = data.choices?.[0]?.message?.content || 'ظ…ط§ ط¬ط§ط´ ط¬ظˆط§ط¨';
+    const text = data.choices?.[0]?.message?.content || 'ما جاش جواب';
     res.json({ text });
 
   } catch (err) {
-    res.status(500).json({ error: 'ط®ط·ط£ ظپظ€ ط§ظ„ط§طھطµط§ظ„ ط¨ظ€ OpenRouter: ' + err.message });
+    res.status(500).json({ error: 'خطأ فـ الاتصال بـ OpenRouter: ' + err.message });
   }
 });
 
