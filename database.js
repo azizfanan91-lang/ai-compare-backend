@@ -1,30 +1,34 @@
-// هاد الملف كيدير الاتصال بقاعدة البيانات (SQLite - ملف محلي، بسيط للبداية)
+const { Pool } = require('pg');
 
-const Database = require('better-sqlite3');
-const path = require('path');
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
 
-const db = new Database(path.join(__dirname, 'app.db'));
+async function init() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id SERIAL PRIMARY KEY,
+      email TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      is_premium INTEGER DEFAULT 0,
+      stripe_customer_id TEXT,
+      paypal_subscription_id TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS usage_log (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      date TEXT NOT NULL,
+      count INTEGER DEFAULT 0,
+      UNIQUE(user_id, date)
+    );
+  `);
+  console.log('قاعدة البيانات (Postgres) جاهزة ✅');
+}
 
-db.pragma('foreign_keys = ON');
+init().catch(err => console.error('خطأ فـ تجهيز قاعدة البيانات:', err));
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    email TEXT UNIQUE NOT NULL,
-    password_hash TEXT NOT NULL,
-    is_premium INTEGER DEFAULT 0,
-    stripe_customer_id TEXT,
-    created_at TEXT DEFAULT (datetime('now'))
-  );
-
-  CREATE TABLE IF NOT EXISTS usage_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    date TEXT NOT NULL,
-    count INTEGER DEFAULT 0,
-    FOREIGN KEY (user_id) REFERENCES users(id),
-    UNIQUE(user_id, date)
-  );
-`);
-
-module.exports = db;
+module.exports = pool;
