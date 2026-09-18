@@ -14,8 +14,13 @@ async function init() {
       is_premium INTEGER DEFAULT 0,
       stripe_customer_id TEXT,
       paypal_subscription_id TEXT,
+      gumroad_subscription_id TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
+  `);
+  // إضافة العمود إلا كانت قاعدة البيانات قديمة ومازال ماعندهاش هاد العمود
+  await pool.query(`
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS gumroad_subscription_id TEXT;
   `);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS usage_log (
