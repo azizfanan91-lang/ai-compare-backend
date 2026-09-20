@@ -1,47 +1,20 @@
-require('dotenv').config();
-const express = require('express');
-const cors = require('cors');
-
-const authRoutes = require('./authRoutes');
-const chatRoutes = require('./chatRoutes');
-const adminRoutes = require('./adminRoutes');
-const paymentRoutes = require('./paymentRoutes');
-
-// جديد: توليد الصور
-const imageRoutes = require('./imageRoutes');
-
-const app = express();
-
-app.use(cors());
-app.use(express.json());
-
-// API الحالية
-app.use('/api/auth', authRoutes);
-app.use('/api', chatRoutes);
-app.use('/api/admin', adminRoutes);
-app.use('/api/payment', paymentRoutes);
-
-// API الصور
-app.use('/api/images', imageRoutes);
-
-app.get('/', (req, res) => {
-  res.json({
-    status: 'ok',
-    message: 'AI Compare Backend خدام',
-    features: [
-      'authentication',
-      'chat',
-      'comparison',
-      'payments',
-      'image-generation'
-    ]
-  });
-});
-
-const PORT = process.env.PORT || 3000;
-
-app.listen(PORT, () => {
-  console.log(
-    `السيرفر خدام على http://localhost:${PORT}`
-  );
-});
+{
+  "name": "ai-compare-backend",
+  "version": "1.0.0",
+  "description": "Backend for AI model comparison app",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^1.4.5-lts.1",
+    "pg": "^8.11.3"
+  }
+}
