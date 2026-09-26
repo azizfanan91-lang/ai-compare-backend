@@ -88,13 +88,17 @@ const IMAGE_FALLBACK_MODELS = [
 let imageModelsCache = { data: null, at: 0 };
 const IMAGE_MODELS_TTL = 60 * 60 * 1000; // ساعة
 
+const POLLINATIONS_REFERRER = process.env.POLLINATIONS_REFERRER || 'usequerymix.com';
+
 router.get('/image/models', async (req, res) => {
   try {
     if (imageModelsCache.data && Date.now() - imageModelsCache.at < IMAGE_MODELS_TTL) {
       return res.json({ models: imageModelsCache.data });
     }
 
-    const response = await fetch('https://image.pollinations.ai/models');
+    const response = await fetch('https://image.pollinations.ai/models', {
+      headers: { 'Referer': `https://${POLLINATIONS_REFERRER}/` }
+    });
     const raw = await response.json();
 
     // الاستجابة عادة جدول من الأسماء (strings)، تنحولوها لكائنات {id, label}
@@ -142,13 +146,31 @@ router.post('/image', requireAuth, async (req, res) => {
 
     const seed = Math.floor(Math.random() * 1e9);
     const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}` +
-      `?model=${encodeURIComponent(model)}&width=${w}&height=${h}&seed=${seed}&nologo=true`;
+      `?model=${encodeURIComponent(model)}&width=${w}&height=${h}&seed=${seed}&nologo=true` +
+      `&referrer=${encodeURIComponent(POLLINATIONS_REFERRER)}`;
 
-    const imgResponse = await fetch(url);
+    const imgHeaders = { 'Referer': `https://${POLLINATIONS_REFERRER}/` };
+    if (process.env.POLLINATIONS_TOKEN) {
+      imgHeaders['Authorization'] = 'Bearer ' + process.env.POLLINATIONS_TOKEN;
+    }
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 60000);
+    let imgResponse;
+    try {
+      imgResponse = await fetch(url, { headers: imgHeaders, signal: controller.signal });
+    } finally {
+      clearTimeout(timeoutId);
+    }
     const contentType = imgResponse.headers.get('content-type') || '';
 
     if (!imgResponse.ok || !contentType.startsWith('image/')) {
-      return res.status(502).json({ error: 'تعذّر توليد الصورة. جرّب وصفاً آخر أو نموذجاً آخر.' });
+      // كنسجلو التفاصيل فـ logs ديال Render، وكنرجعوها ليك مباشرة هنا مؤقتاً باش نشخصو بسرعة
+      const bodyPreview = await imgResponse.text().catch(() => '');
+      console.error('Pollinations image error:', imgResponse.status, contentType, bodyPreview.slice(0, 300));
+      return res.status(502).json({
+        error: `تعذّر توليد الصورة — status:${imgResponse.status} type:${contentType || 'none'} body:${bodyPreview.slice(0, 200) || 'فارغ'}`
+      });
     }
 
     const buffer = Buffer.from(await imgResponse.arrayBuffer());
