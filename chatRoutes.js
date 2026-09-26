@@ -90,6 +90,29 @@ const IMAGE_MODELS_TTL = 60 * 60 * 1000; // ساعة
 
 const POLLINATIONS_REFERRER = process.env.POLLINATIONS_REFERRER || 'usequerymix.com';
 
+// مسار تجريبي مؤقت للتشخيص فقط — كتقدر تفتحو مباشرة فالمتصفح بلا تسجيل دخول
+// امسحو من بعد ما نحلو المشكل
+router.get('/image/test', async (req, res) => {
+  try {
+    const url = `https://image.pollinations.ai/prompt/${encodeURIComponent('a red apple')}` +
+      `?model=flux&width=512&height=512&seed=1&nologo=true&referrer=${encodeURIComponent(POLLINATIONS_REFERRER)}`;
+    const imgHeaders = { 'Referer': `https://${POLLINATIONS_REFERRER}/` };
+    if (process.env.POLLINATIONS_TOKEN) imgHeaders['Authorization'] = 'Bearer ' + process.env.POLLINATIONS_TOKEN;
+
+    const r = await fetch(url, { headers: imgHeaders });
+    const ct = r.headers.get('content-type') || '';
+    if (!r.ok || !ct.startsWith('image/')) {
+      const body = await r.text().catch(() => '');
+      return res.json({ ok: false, status: r.status, contentType: ct, body: body.slice(0, 500) });
+    }
+    const buf = Buffer.from(await r.arrayBuffer());
+    res.set('Content-Type', ct);
+    res.send(buf);
+  } catch (err) {
+    res.json({ ok: false, crashed: true, message: err.message });
+  }
+});
+
 router.get('/image/models', async (req, res) => {
   try {
     if (imageModelsCache.data && Date.now() - imageModelsCache.at < IMAGE_MODELS_TTL) {
