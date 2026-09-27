@@ -18,12 +18,20 @@ async function init() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
   `);
-  // إضافة العمود إلا كانت قاعدة البيانات قديمة ومازال ماعندهاش هاد العمود
   await pool.query(`
     ALTER TABLE users ADD COLUMN IF NOT EXISTS gumroad_subscription_id TEXT;
   `);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS usage_log (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      date TEXT NOT NULL,
+      count INTEGER DEFAULT 0,
+      UNIQUE(user_id, date)
+    );
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS image_usage_log (
       id SERIAL PRIMARY KEY,
       user_id INTEGER NOT NULL REFERENCES users(id),
       date TEXT NOT NULL,
