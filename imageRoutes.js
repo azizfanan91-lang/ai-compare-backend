@@ -6,19 +6,19 @@ const router = express.Router();
 
 const MODELS = {
   flux: {
-    id: 'black-forest-labs/FLUX.1-schnell',
-    name: 'FLUX Schnell',
-    description: 'سريع جداً'
-  },
-  sdxl: {
-    id: 'stabilityai/stable-diffusion-xl-base-1.0',
-    name: 'Stable Diffusion XL',
+    id: 'flux',
+    name: 'FLUX',
     description: 'جودة عالية'
   },
-  sd35: {
-    id: 'stabilityai/stable-diffusion-3.5-medium',
-    name: 'SD 3.5 Medium',
-    description: 'توازن بين السرعة والجودة'
+  turbo: {
+    id: 'turbo',
+    name: 'SDXL Turbo',
+    description: 'سريع جداً'
+  },
+  dreamshaper: {
+    id: 'dreamshaper',
+    name: 'DreamShaper',
+    description: 'إبداعي وسلس'
   }
 };
 
@@ -34,7 +34,6 @@ function containsBlockedContent(text) {
   return BLOCKED_KEYWORDS.some(k => lower.includes(k));
 }
 
-// إرجاع قائمة النماذج المتاحة
 router.get('/models', (req, res) => {
   const list = Object.entries(MODELS).map(([key, val]) => ({
     key,
@@ -71,9 +70,6 @@ router.post('/generate', requireAuth, async (req, res) => {
   if (containsBlockedContent(prompt)) {
     return res.status(400).json({ error: 'الوصف مخالف لسياسة الاستخدام، جرب وصف آخر' });
   }
-  if (!process.env.HUGGINGFACE_API_KEY) {
-    return res.status(500).json({ error: 'توليد الصور ماشي معمر مزيان فالسيرفر' });
-  }
 
   const selectedModel = MODELS[modelKey] || MODELS.flux;
 
@@ -92,36 +88,20 @@ router.post('/generate', requireAuth, async (req, res) => {
       });
     }
 
-    const hfResponse = await fetch(
-      `https://api-inference.huggingface.co/models/${selectedModel.id}`,
-      {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${process.env.HUGGINGFACE_API_KEY}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ inputs: prompt })
-      }
-    );
+    const encodedPrompt = encodeURIComponent(prompt);
+    const pollinationsUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?model=${selectedModel.id}&width=1024&height=1024&nologo=true`;
 
-    if (hfResponse.status === 503) {
-      const errData = await hfResponse.json().catch(() => ({}));
-      const wait = errData.estimated_time ? Math.ceil(errData.estimated_time) : 20;
-      return res.status(503).json({
-        error: `النموذج كيخدم عاود يتشغل، استنى ${wait} ثانية وعاود جرب`,
-        retry_after: wait
-      });
+    const response = await fetch(pollinationsUrl, {
+      headers: { 'User-Agent': 'QueryMix/1.0' }
+    });
+
+    if (!response.ok) {
+      return res.status(502).json({ error: 'وقع مشكل فتوليد الصورة، عاود جرب' });
     }
 
-    if (!hfResponse.ok) {
-      const errData = await hfResponse.json().catch(() => ({}));
-      console.error('خطأ من Hugging Face:', errData);
-      return res.status(502).json({ error: errData.error || 'وقع مشكل فتوليد الصورة' });
-    }
-
-    const arrayBuffer = await hfResponse.arrayBuffer();
+    const arrayBuffer = await response.arrayBuffer();
     const base64 = Buffer.from(arrayBuffer).toString('base64');
-    const contentType = hfResponse.headers.get('content-type') || 'image/png';
+    const contentType = response.headers.get('content-type') || 'image/jpeg';
     const dataUri = `data:${contentType};base64,${base64}`;
 
     await db.query(`
@@ -141,5 +121,3 @@ router.post('/generate', requireAuth, async (req, res) => {
 });
 
 module.exports = router;
-
-
