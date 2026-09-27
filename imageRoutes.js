@@ -4,10 +4,24 @@ const { requireAuth } = require('./authMiddleware');
 
 const router = express.Router();
 
-// نموذج مجاني وسريع نسبيا على Hugging Face Inference API
-const HF_MODEL = process.env.HF_IMAGE_MODEL || 'black-forest-labs/FLUX.1-schnell';
+const MODELS = {
+  flux: {
+    id: 'black-forest-labs/FLUX.1-schnell',
+    name: 'FLUX Schnell',
+    description: 'سريع جداً'
+  },
+  sdxl: {
+    id: 'stabilityai/stable-diffusion-xl-base-1.0',
+    name: 'Stable Diffusion XL',
+    description: 'جودة عالية'
+  },
+  sd35: {
+    id: 'stabilityai/stable-diffusion-3.5-medium',
+    name: 'SD 3.5 Medium',
+    description: 'توازن بين السرعة والجودة'
+  }
+};
 
-// حد يومي باش نحميو من الاستغلال (الخدمة مجانية بس عندها rate limit خاص بيها هي الأخرى)
 const IMAGE_DAILY_LIMIT = parseInt(process.env.IMAGE_DAILY_LIMIT || '15', 10);
 
 const BLOCKED_KEYWORDS = [
@@ -19,6 +33,16 @@ function containsBlockedContent(text) {
   const lower = text.toLowerCase();
   return BLOCKED_KEYWORDS.some(k => lower.includes(k));
 }
+
+// إرجاع قائمة النماذج المتاحة
+router.get('/models', (req, res) => {
+  const list = Object.entries(MODELS).map(([key, val]) => ({
+    key,
+    name: val.name,
+    description: val.description
+  }));
+  res.json({ models: list });
+});
 
 router.get('/usage', requireAuth, async (req, res) => {
   try {
@@ -36,7 +60,7 @@ router.get('/usage', requireAuth, async (req, res) => {
 });
 
 router.post('/generate', requireAuth, async (req, res) => {
-  const { prompt } = req.body;
+  const { prompt, model: modelKey = 'flux' } = req.body;
 
   if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
     return res.status(400).json({ error: 'خاصك تكتب وصف للصورة' });
@@ -50,6 +74,8 @@ router.post('/generate', requireAuth, async (req, res) => {
   if (!process.env.HUGGINGFACE_API_KEY) {
     return res.status(500).json({ error: 'توليد الصور ماشي معمر مزيان فالسيرفر' });
   }
+
+  const selectedModel = MODELS[modelKey] || MODELS.flux;
 
   try {
     const today = new Date().toISOString().split('T')[0];
@@ -67,7 +93,7 @@ router.post('/generate', requireAuth, async (req, res) => {
     }
 
     const hfResponse = await fetch(
-      `https://api-inference.huggingface.co/models/${HF_MODEL}`,
+      `https://api-inference.huggingface.co/models/${selectedModel.id}`,
       {
         method: 'POST',
         headers: {
@@ -78,7 +104,6 @@ router.post('/generate', requireAuth, async (req, res) => {
       }
     );
 
-    // كي يكون النموذج "نايض" (cold start)، Hugging Face كيرجع 503 مع estimated_time
     if (hfResponse.status === 503) {
       const errData = await hfResponse.json().catch(() => ({}));
       const wait = errData.estimated_time ? Math.ceil(errData.estimated_time) : 20;
@@ -94,7 +119,6 @@ router.post('/generate', requireAuth, async (req, res) => {
       return res.status(502).json({ error: errData.error || 'وقع مشكل فتوليد الصورة' });
     }
 
-    // الجواب كايجي كـ binary (صورة)، خاصنا نحولوه لـ base64 باش نبعتوه فـ JSON
     const arrayBuffer = await hfResponse.arrayBuffer();
     const base64 = Buffer.from(arrayBuffer).toString('base64');
     const contentType = hfResponse.headers.get('content-type') || 'image/png';
@@ -107,6 +131,7 @@ router.post('/generate', requireAuth, async (req, res) => {
 
     res.json({
       image: dataUri,
+      model: selectedModel.name,
       remaining: Math.max(0, IMAGE_DAILY_LIMIT - (used + 1))
     });
   } catch (err) {
