@@ -184,6 +184,7 @@ router.post('/generate', requireAuth, async (req, res) => {
     // نجربو المزودين بالترتيب حتى واحد ينجح
     let dataUri = null;
     let usedProvider = null;
+    const attempts = [];
     for (const providerName of selected.chain) {
       try {
         dataUri = await PROVIDERS[providerName](prompt);
@@ -191,11 +192,14 @@ router.post('/generate', requireAuth, async (req, res) => {
         break;
       } catch (err) {
         console.error(`مزود الصور ${providerName} فشل:`, err.message);
+        attempts.push(`${providerName}: ${err.message}`);
       }
     }
 
     if (!dataUri) {
-      return res.status(502).json({ error: 'خدمات توليد الصور مشغولة دابا، عاود جرب من بعد شوية' });
+      return res.status(502).json({
+        error: `خدمات توليد الصور مشغولة دابا. [${attempts.join(' | ')}]`
+      });
     }
 
     // كنحسبو غير الصور اللي نجحات
