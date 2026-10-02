@@ -8,17 +8,20 @@ const MODELS = {
   flux: {
     name: 'FLUX.1 Schnell',
     description: 'سريع وجودة عالية',
-    cfModel: '@cf/black-forest-labs/flux-1-schnell'
+    cfModel: '@cf/black-forest-labs/flux-1-schnell',
+    params: { prompt: true } // FLUX يقبل prompt فقط
   },
   sdxl: {
     name: 'Stable Diffusion XL',
     description: 'تفاصيل دقيقة',
-    cfModel: '@cf/stabilityai/stable-diffusion-xl-base-1.0'
+    cfModel: '@cf/stabilityai/stable-diffusion-xl-base-1.0',
+    params: { num_steps: 20 }
   },
   dreamshaper: {
     name: 'DreamShaper',
     description: 'إبداعي وسلس',
-    cfModel: '@cf/lykon/dreamshaper-8-lcm'
+    cfModel: '@cf/lykon/dreamshaper-8-lcm',
+    params: { num_steps: 8 }
   }
 };
 
@@ -97,22 +100,23 @@ router.post('/generate', requireAuth, async (req, res) => {
 
     const cfUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${selectedModel.cfModel}`;
 
+    // FLUX يقبل prompt فقط، النماذج الأخرى تقبل num_steps
+    const body = selectedModel.params?.prompt
+      ? { prompt }
+      : { prompt, ...selectedModel.params };
+
     const response = await fetch(cfUrl, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${apiToken}`,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({
-        prompt,
-        num_steps: 4,
-        guidance: 3.5
-      })
+      body: JSON.stringify(body)
     });
 
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
-      console.error('خطأ من Cloudflare:', err);
+      console.error('خطأ من Cloudflare:', JSON.stringify(err));
       return res.status(502).json({ error: 'وقع مشكل فتوليد الصورة، عاود جرب' });
     }
 
