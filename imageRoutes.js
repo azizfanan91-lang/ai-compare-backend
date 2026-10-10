@@ -55,7 +55,8 @@ const MODELS = {
   }
 };
 
-const IMAGE_DAILY_LIMIT = parseInt(process.env.IMAGE_DAILY_LIMIT || '15', 10);
+const FREE_IMAGE_DAILY_LIMIT = parseInt(process.env.FREE_IMAGE_DAILY_LIMIT || '3', 10);
+const PREMIUM_IMAGE_DAILY_LIMIT = parseInt(process.env.PREMIUM_IMAGE_DAILY_LIMIT || '100', 10);
 
 const BLOCKED_KEYWORDS = [
   'child', 'kid', 'minor', 'طفل', 'أطفال',
@@ -79,12 +80,15 @@ router.get('/models', (req, res) => {
 router.get('/usage', requireAuth, async (req, res) => {
   try {
     const today = new Date().toISOString().split('T')[0];
+    const userResult = await db.query('SELECT is_premium FROM users WHERE id = $1', [req.userId]);
+    const isPremium = !!userResult.rows[0]?.is_premium;
+    const limit = isPremium ? PREMIUM_IMAGE_DAILY_LIMIT : FREE_IMAGE_DAILY_LIMIT;
     const result = await db.query(
       'SELECT count FROM image_usage_log WHERE user_id = $1 AND date = $2',
       [req.userId, today]
     );
     const used = result.rows[0]?.count || 0;
-    res.json({ used, limit: IMAGE_DAILY_LIMIT, remaining: Math.max(0, IMAGE_DAILY_LIMIT - used) });
+    res.json({ used, limit, remaining: Math.max(0, limit - used), is_premium: isPremium });
   } catch (err) {
     console.error('خطأ فـ image usage:', err);
     res.status(500).json({ error: 'وقع مشكل فالسيرفر' });
@@ -114,15 +118,18 @@ router.post('/generate', requireAuth, async (req, res) => {
 
   try {
     const today = new Date().toISOString().split('T')[0];
+    const userResult = await db.query('SELECT is_premium FROM users WHERE id = $1', [req.userId]);
+    const isPremium = !!userResult.rows[0]?.is_premium;
     const usageResult = await db.query(
       'SELECT count FROM image_usage_log WHERE user_id = $1 AND date = $2',
       [req.userId, today]
     );
     const used = usageResult.rows[0]?.count || 0;
+    const imageLimit = isPremium ? PREMIUM_IMAGE_DAILY_LIMIT : FREE_IMAGE_DAILY_LIMIT;
 
-    if (used >= IMAGE_DAILY_LIMIT) {
+    if (used >= imageLimit) {
       return res.status(429).json({
-        error: `وصلتي للحد اليومي (${IMAGE_DAILY_LIMIT} صورة). عاود جرب غدا.`,
+        error: `وصلتي للحد اليومي (${imageLimit} صورة). عاود جرب غدا أو اشترك باش تكمل.`,
         limit_reached: true
       });
     }
@@ -178,7 +185,8 @@ router.post('/generate', requireAuth, async (req, res) => {
     res.json({
       image: dataUri,
       model: usedModel.name,
-      remaining: Math.max(0, IMAGE_DAILY_LIMIT - (used + 1))
+      remaining: Math.max(0, imageLimit - (used + 1)),
+      limit: imageLimit
     });
   } catch (err) {
     console.error('خطأ فتوليد الصورة:', err);

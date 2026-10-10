@@ -4,6 +4,7 @@ const { requireAuth } = require('./authMiddleware');
 
 const router = express.Router();
 const TRIAL_DAYS = parseInt(process.env.TRIAL_DAYS || '7', 10);
+const FREE_CHAT_DAILY_LIMIT = parseInt(process.env.FREE_CHAT_DAILY_LIMIT || '10', 10);
 const FREE_CHAT_FALLBACKS = [
   'openrouter/free',
   'google/gemma-4-31b-it:free',
@@ -25,12 +26,21 @@ router.get('/usage', requireAuth, async (req, res) => {
     if (!user) return res.status(401).json({ error: 'الحساب ماعادش موجود، عاود سجل الدخول' });
     const isPremium = !!user.is_premium;
     const trial = getTrialStatus(user.created_at);
+    const today = new Date().toISOString().split('T')[0];
+    const usageResult = await db.query(
+      'SELECT count FROM usage_log WHERE user_id = $1 AND date = $2',
+      [req.userId, today]
+    );
+    const chatUsed = usageResult.rows[0]?.count || 0;
     res.json({
       is_premium: isPremium,
       in_trial: !isPremium && trial.inTrial,
       trial_days_left: !isPremium ? trial.daysLeft : null,
       trial_total_days: TRIAL_DAYS,
-      unlimited: isPremium || trial.inTrial
+      unlimited: isPremium,
+      chat_used: chatUsed,
+      chat_limit: isPremium ? null : FREE_CHAT_DAILY_LIMIT,
+      chat_remaining: isPremium ? null : Math.max(0, FREE_CHAT_DAILY_LIMIT - chatUsed)
     });
   } catch (err) {
     res.status(500).json({ error: 'وقع مشكل فالسيرفر' });
@@ -53,6 +63,21 @@ router.post('/chat', requireAuth, async (req, res) => {
       return res.status(429).json({
         error: 'خلصات التجربة المجانية ديالك (' + TRIAL_DAYS + ' أيام). اشترك باش تكمل تستعمل الموقع بلا حدود.',
         trial_ended: true
+      });
+    }
+
+    const chatToday = new Date().toISOString().split('T')[0];
+    const chatUsageResult = await db.query(
+      'SELECT count FROM usage_log WHERE user_id = $1 AND date = $2',
+      [req.userId, chatToday]
+    );
+    const chatUsed = chatUsageResult.rows[0]?.count || 0;
+    if (!isPremium && chatUsed >= FREE_CHAT_DAILY_LIMIT) {
+      return res.status(429).json({
+        error: `وصلتي للحد المجاني اليومي (${FREE_CHAT_DAILY_LIMIT} محادثات). عاود جرب غدا أو اشترك باش تكمل.`,
+        limit_reached: true,
+        chat_used: chatUsed,
+        chat_limit: FREE_CHAT_DAILY_LIMIT
       });
     }
 
@@ -90,7 +115,8 @@ router.post('/chat', requireAuth, async (req, res) => {
 
     res.json({ text: data.choices?.[0]?.message?.content || 'ما جاش جواب' });
   } catch (err) {
-    res.status(500).json({ error: 'خطأ فـ الاتصال بـ OpenRouter: ' + err.message });
+    console.error('خطأ فـ الاتصال بـ OpenRouter:', err.message);
+    res.status(500).json({ error: 'وقع مشكل فالاتصال بالنماذج، عاود جرب من بعد.' });
   }
 });
 

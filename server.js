@@ -12,6 +12,26 @@ const db = require('./database');
 const imageRoutes = require('./imageRoutes');
 
 const app = express();
+app.set('trust proxy', 1);
+
+const rateBuckets = new Map();
+function rateLimit({ windowMs, max, name }) {
+  return (req, res, next) => {
+    const key = `${name}:${req.ip}`;
+    const now = Date.now();
+    const bucket = rateBuckets.get(key);
+    if (!bucket || now - bucket.startedAt >= windowMs) {
+      rateBuckets.set(key, { startedAt: now, count: 1 });
+      return next();
+    }
+    bucket.count += 1;
+    if (bucket.count > max) {
+      res.set('Retry-After', String(Math.ceil((windowMs - (now - bucket.startedAt)) / 1000)));
+      return res.status(429).json({ error: 'طلبات كثيرة بزاف، عاود جرب من بعد شوية.' });
+    }
+    next();
+  };
+}
 
 // CORS: كنسمحو غير للدومين الحقيقي ديال الموقع، ماشي لأي موقع فالعالم
 // ALLOWED_ORIGINS فـ Render: دومينات مفصولة بفاصلة، مثلاً:
@@ -33,8 +53,10 @@ app.use(cors({
 }));
 app.use(express.json());
 
-app.use('/api/auth', authRoutes);
-app.use('/api', chatRoutes);
+app.use('/api/auth', rateLimit({ windowMs: 15 * 60 * 1000, max: 20, name: 'auth' }), authRoutes);
+app.use('/api/chat', rateLimit({ windowMs: 60 * 1000, max: 20, name: 'chat' }));
+app.use('/api/images/generate', rateLimit({ windowMs: 60 * 1000, max: 10, name: 'images' }));
+app.use('/api', rateLimit({ windowMs: 60 * 1000, max: 120, name: 'api' }), chatRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/payment', paymentRoutes);
 

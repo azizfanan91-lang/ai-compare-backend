@@ -5,8 +5,13 @@ const db = require('./database');
 
 const router = express.Router();
 
+function normalizeEmail(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
 router.post('/signup', async (req, res) => {
-  const { email, password } = req.body;
+  const email = normalizeEmail(req.body.email);
+  const { password } = req.body;
   if (!email || !password) {
     return res.status(400).json({ error: 'خاصك تعمر الإيميل وكلمة السر' });
   }
@@ -14,7 +19,7 @@ router.post('/signup', async (req, res) => {
     return res.status(400).json({ error: 'كلمة السر خاصها تكون 6 حروف/أرقام على الأقل' });
   }
   try {
-    const existing = await db.query('SELECT id FROM users WHERE email = $1', [email]);
+    const existing = await db.query('SELECT id FROM users WHERE LOWER(email) = $1', [email]);
     if (existing.rows.length > 0) {
       return res.status(409).json({ error: 'هاد الإيميل مسجل من قبل' });
     }
@@ -32,12 +37,16 @@ router.post('/signup', async (req, res) => {
 });
 
 router.post('/login', async (req, res) => {
-  const { email, password } = req.body;
+  const email = normalizeEmail(req.body.email);
+  const { password } = req.body;
   if (!email || !password) {
     return res.status(400).json({ error: 'خاصك تعمر الإيميل وكلمة السر' });
   }
   try {
-    const result = await db.query('SELECT * FROM users WHERE email = $1', [email]);
+    const result = await db.query(
+      'SELECT id, email, password_hash, is_premium FROM users WHERE LOWER(email) = $1',
+      [email]
+    );
     const user = result.rows[0];
     if (!user) return res.status(401).json({ error: 'الإيميل ولا كلمة السر غالطين' });
     const valid = await bcrypt.compare(password, user.password_hash);
