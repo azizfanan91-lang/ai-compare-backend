@@ -4,6 +4,11 @@ const { requireAuth } = require('./authMiddleware');
 
 const router = express.Router();
 const TRIAL_DAYS = parseInt(process.env.TRIAL_DAYS || '7', 10);
+const FREE_CHAT_FALLBACKS = [
+  'openrouter/free',
+  'google/gemma-4-31b-it:free',
+  'nvidia/nemotron-3.5-lightning:free'
+];
 
 function getTrialStatus(createdAt) {
   const createdDate = new Date(createdAt);
@@ -51,20 +56,31 @@ router.post('/chat', requireAuth, async (req, res) => {
       });
     }
 
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + process.env.OPENROUTER_API_KEY
-      },
-      body: JSON.stringify({
-        model,
-        messages: [{ role: 'user', content: prompt }],
-        max_tokens: 1500
-      })
-    });
-    const data = await response.json();
-    if (data.error) return res.status(502).json({ error: data.error.message });
+    const candidates = [model, ...FREE_CHAT_FALLBACKS].filter((value, index, list) => value && list.indexOf(value) === index);
+    let data = null;
+    let lastError = 'النموذج غير متاح حاليا';
+    for (const candidate of candidates) {
+      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + process.env.OPENROUTER_API_KEY
+        },
+        body: JSON.stringify({
+          model: candidate,
+          messages: [{ role: 'user', content: prompt }],
+          max_tokens: 1500
+        })
+      });
+      const candidateData = await response.json().catch(() => ({}));
+      if (response.ok && !candidateData.error && candidateData.choices?.[0]?.message?.content) {
+        data = candidateData;
+        break;
+      }
+      lastError = candidateData.error?.message || `HTTP ${response.status}`;
+      console.warn(`OpenRouter model failed (${candidate}): ${lastError}`);
+    }
+    if (!data) return res.status(502).json({ error: 'تعذّر تشغيل النماذج المجانية: ' + lastError });
 
     const today = new Date().toISOString().split('T')[0];
     await db.query(`

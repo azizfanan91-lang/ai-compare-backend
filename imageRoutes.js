@@ -82,6 +82,8 @@ router.post('/generate', requireAuth, async (req, res) => {
   }
 
   const selectedModel = MODELS[modelKey] || MODELS.flux;
+  const imageCandidates = [selectedModel, MODELS.flux, MODELS.sdxl, MODELS.dreamshaper]
+    .filter((value, index, list) => value && list.indexOf(value) === index);
 
   try {
     const today = new Date().toISOString().split('T')[0];
@@ -98,29 +100,32 @@ router.post('/generate', requireAuth, async (req, res) => {
       });
     }
 
-    const cfUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${selectedModel.cfModel}`;
-
-    // FLUX يقبل prompt فقط، النماذج الأخرى تقبل num_steps
-    const body = selectedModel.params?.prompt
-      ? { prompt }
-      : { prompt, ...selectedModel.params };
-
-    const response = await fetch(cfUrl, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiToken}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(body)
-    });
-
-    if (!response.ok) {
+    let arrayBuffer = null;
+    let usedModel = selectedModel;
+    let lastError = null;
+    for (const candidate of imageCandidates) {
+      const cfUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${candidate.cfModel}`;
+      const body = candidate.params?.prompt ? { prompt } : { prompt, ...candidate.params };
+      const response = await fetch(cfUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(body)
+      });
+      if (response.ok) {
+        arrayBuffer = await response.arrayBuffer();
+        usedModel = candidate;
+        break;
+      }
       const err = await response.json().catch(() => ({}));
-      console.error('خطأ من Cloudflare:', JSON.stringify(err));
-      return res.status(502).json({ error: 'وقع مشكل فتوليد الصورة، عاود جرب' });
+      lastError = err.errors?.[0]?.message || `HTTP ${response.status}`;
+      console.warn(`Cloudflare image model failed (${candidate.name}): ${lastError}`);
     }
-
-    const arrayBuffer = await response.arrayBuffer();
+    if (!arrayBuffer) {
+      return res.status(502).json({ error: 'تعذّر توليد الصورة بالنماذج المجانية: ' + (lastError || 'حاول مرة أخرى') });
+    }
     const base64 = Buffer.from(arrayBuffer).toString('base64');
     const dataUri = `data:image/png;base64,${base64}`;
 
@@ -131,7 +136,7 @@ router.post('/generate', requireAuth, async (req, res) => {
 
     res.json({
       image: dataUri,
-      model: selectedModel.name,
+      model: usedModel.name,
       remaining: Math.max(0, IMAGE_DAILY_LIMIT - (used + 1))
     });
   } catch (err) {
