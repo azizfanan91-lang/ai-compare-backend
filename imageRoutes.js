@@ -92,8 +92,9 @@ router.get('/usage', requireAuth, async (req, res) => {
 });
 
 router.post('/generate', requireAuth, async (req, res) => {
-  const { prompt, model: modelKey = 'flux' } = req.body;
-
+  const { prompt, model: modelKey = 'flux', width, height } = req.body;
+  const w = Math.min(Math.max(parseInt(width, 10) || 1024, 256), 1536);
+  const h = Math.min(Math.max(parseInt(height, 10) || 1024, 256), 1536);
   if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
     return res.status(400).json({ error: 'خاصك تكتب وصف للصورة' });
   }
