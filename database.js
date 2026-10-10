@@ -48,6 +48,21 @@ async function init() {
       UNIQUE(user_id, date)
     );
   `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS saved_results (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      kind TEXT NOT NULL DEFAULT 'text',
+      title TEXT NOT NULL,
+      content TEXT NOT NULL,
+      model TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS saved_results_user_created_idx
+    ON saved_results (user_id, created_at DESC);
+  `);
   console.log('قاعدة البيانات (Postgres) جاهزة ✅');
 }
 

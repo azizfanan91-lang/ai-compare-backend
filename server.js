@@ -6,6 +6,7 @@ const authRoutes = require('./authRoutes');
 const chatRoutes = require('./chatRoutes');
 const adminRoutes = require('./adminRoutes');
 const paymentRoutes = require('./paymentRoutes');
+const savedRoutes = require('./savedRoutes');
 const db = require('./database');
 
 // جديد
@@ -59,6 +60,7 @@ app.use('/api/images/generate', rateLimit({ windowMs: 60 * 1000, max: 10, name: 
 app.use('/api', rateLimit({ windowMs: 60 * 1000, max: 120, name: 'api' }), chatRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/payment', paymentRoutes);
+app.use('/api/saved-results', rateLimit({ windowMs: 60 * 1000, max: 60, name: 'saved' }), savedRoutes);
 
 // جديد
 app.use('/api/images', imageRoutes);
