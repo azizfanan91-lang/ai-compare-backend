@@ -22,6 +22,36 @@ const MODELS = {
     description: 'إبداعي وسلس',
     cfModel: '@cf/lykon/dreamshaper-8-lcm',
     params: { num_steps: 8 }
+  },
+  'pollinations-flux': {
+    name: 'Flux (Free)',
+    description: 'بديل مجاني سريع',
+    provider: 'pollinations',
+    pollinationsModel: 'flux'
+  },
+  zimage: {
+    name: 'Z-Image Turbo',
+    description: 'سريع ومجاني',
+    provider: 'pollinations',
+    pollinationsModel: 'z-image'
+  },
+  sana: {
+    name: 'Sana',
+    description: 'إبداعي ومجاني',
+    provider: 'pollinations',
+    pollinationsModel: 'sana'
+  },
+  'flux-klein': {
+    name: 'FLUX Klein',
+    description: 'خفيف وسريع',
+    provider: 'pollinations',
+    pollinationsModel: 'flux-klein'
+  },
+  'sdxl-lightning': {
+    name: 'SDXL Lightning',
+    description: 'سريع بجودة جيدة',
+    provider: 'pollinations',
+    pollinationsModel: 'sdxl-lightning-free'
   }
 };
 
@@ -77,12 +107,8 @@ router.post('/generate', requireAuth, async (req, res) => {
   const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
   const apiToken = process.env.CLOUDFLARE_API_TOKEN;
 
-  if (!accountId || !apiToken) {
-    return res.status(500).json({ error: 'خدمة توليد الصور غير مهيأة' });
-  }
-
   const selectedModel = MODELS[modelKey] || MODELS.flux;
-  const imageCandidates = [selectedModel, MODELS.flux, MODELS.sdxl, MODELS.dreamshaper]
+  const imageCandidates = [selectedModel, ...Object.values(MODELS)]
     .filter((value, index, list) => value && list.indexOf(value) === index);
 
   try {
@@ -101,33 +127,47 @@ router.post('/generate', requireAuth, async (req, res) => {
     }
 
     let arrayBuffer = null;
+    let imageContentType = 'image/png';
     let usedModel = selectedModel;
     let lastError = null;
     for (const candidate of imageCandidates) {
-      const cfUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${candidate.cfModel}`;
-      const body = candidate.params?.prompt ? { prompt } : { prompt, ...candidate.params };
-      const response = await fetch(cfUrl, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${apiToken}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(body)
-      });
+      let response;
+      if (candidate.provider === 'pollinations') {
+        const pollinationsUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}` +
+          `?model=${encodeURIComponent(candidate.pollinationsModel)}&width=${w}&height=${h}` +
+          `&seed=${Math.floor(Math.random() * 1e9)}&nologo=true`;
+        const headers = { Referer: 'https://usequerymix.com/' };
+        if (process.env.POLLINATIONS_TOKEN) headers.Authorization = `Bearer ${process.env.POLLINATIONS_TOKEN}`;
+        response = await fetch(pollinationsUrl, { headers });
+      } else if (accountId && apiToken) {
+        const cfUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${candidate.cfModel}`;
+        const body = candidate.params?.prompt ? { prompt } : { prompt, ...candidate.params };
+        response = await fetch(cfUrl, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${apiToken}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(body)
+        });
+      } else {
+        continue;
+      }
       if (response.ok) {
         arrayBuffer = await response.arrayBuffer();
+        imageContentType = response.headers.get('content-type') || imageContentType;
         usedModel = candidate;
         break;
       }
-      const err = await response.json().catch(() => ({}));
-      lastError = err.errors?.[0]?.message || `HTTP ${response.status}`;
-      console.warn(`Cloudflare image model failed (${candidate.name}): ${lastError}`);
+      const errorText = await response.text().catch(() => '');
+      lastError = errorText.slice(0, 160) || `HTTP ${response.status}`;
+      console.warn(`Image model failed (${candidate.name}): ${lastError}`);
     }
     if (!arrayBuffer) {
       return res.status(502).json({ error: 'تعذّر توليد الصورة بالنماذج المجانية: ' + (lastError || 'حاول مرة أخرى') });
     }
     const base64 = Buffer.from(arrayBuffer).toString('base64');
-    const dataUri = `data:image/png;base64,${base64}`;
+    const dataUri = `data:${imageContentType};base64,${base64}`;
 
     await db.query(`
       INSERT INTO image_usage_log (user_id, date, count) VALUES ($1, $2, 1)
