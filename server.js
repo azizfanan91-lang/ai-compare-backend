@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const compression = require('compression');
 
 const authRoutes = require('./authRoutes');
 const chatRoutes = require('./chatRoutes');
@@ -53,10 +54,20 @@ app.use(cors({
   }
 }));
 app.use(express.json());
+app.use(compression());
+
+app.get('/health', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({ status: 'ok' });
+});
 
 app.use('/api/auth', rateLimit({ windowMs: 15 * 60 * 1000, max: 20, name: 'auth' }), authRoutes);
 app.use('/api/chat', rateLimit({ windowMs: 60 * 1000, max: 20, name: 'chat' }));
 app.use('/api/images/generate', rateLimit({ windowMs: 60 * 1000, max: 10, name: 'images' }));
+app.use('/api/images/models', (req, res, next) => {
+  res.set('Cache-Control', 'public, max-age=3600, stale-while-revalidate=300');
+  next();
+});
 app.use('/api', rateLimit({ windowMs: 60 * 1000, max: 120, name: 'api' }), chatRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/payment', paymentRoutes);
