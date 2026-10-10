@@ -6,6 +6,7 @@ const authRoutes = require('./authRoutes');
 const chatRoutes = require('./chatRoutes');
 const adminRoutes = require('./adminRoutes');
 const paymentRoutes = require('./paymentRoutes');
+const db = require('./database');
 
 // جديد
 const imageRoutes = require('./imageRoutes');
@@ -64,8 +65,13 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'وقع مشكل فالسيرفر' });
 });
 
-app.listen(PORT, () => {
-  console.log(
-    `السيرفر خدام على http://localhost:${PORT}`
-  );
-});
+db.ready
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`السيرفر خدام على http://localhost:${PORT}`);
+    });
+  })
+  .catch((err) => {
+    console.error('تعذر تشغيل الخادم: قاعدة البيانات غير جاهزة:', err.message);
+    process.exit(1);
+  });

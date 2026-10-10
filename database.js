@@ -1,11 +1,20 @@
 const { Pool } = require('pg');
+if (!process.env.DATABASE_URL) {
+  throw new Error('DATABASE_URL environment variable is required');
+}
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: { rejectUnauthorized: false },
+  connectionTimeoutMillis: 10000,
+  idleTimeoutMillis: 30000
+});
+pool.on('error', (err) => {
+  console.error('خطأ غير متوقع في اتصال PostgreSQL:', err.message);
 });
 
 async function init() {
+  await pool.query('SELECT 1');
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
       id SERIAL PRIMARY KEY,
@@ -42,6 +51,6 @@ async function init() {
   console.log('قاعدة البيانات (Postgres) جاهزة ✅');
 }
 
-init().catch(err => console.error('خطأ فـ تجهيز قاعدة البيانات:', err));
+pool.ready = init();
 
 module.exports = pool;
