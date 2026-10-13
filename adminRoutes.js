@@ -27,6 +27,53 @@ router.get('/users', checkAdminSecret, async (req, res) => {
   }
 });
 
+// GET /api/admin/stats - إحصائيات لوحة الإدارة
+router.get('/stats', checkAdminSecret, async (req, res) => {
+  try {
+    const usersResult = await db.query(`
+      SELECT
+        COUNT(*)::int AS total_users,
+        COUNT(*) FILTER (WHERE is_premium = 1)::int AS premium_users,
+        COUNT(*) FILTER (
+          WHERE is_premium = 0
+          AND created_at >= now() - interval '7 days'
+        )::int AS trial_users
+      FROM users
+    `);
+
+    const usageResult = await db.query(`
+      SELECT COALESCE(SUM(count), 0)::int AS chats_today
+      FROM usage_log
+      WHERE date = CURRENT_DATE::text
+    `);
+
+    const imageUsageResult = await db.query(`
+      SELECT COALESCE(SUM(count), 0)::int AS images_today
+      FROM image_usage_log
+      WHERE date = CURRENT_DATE::text
+    `);
+
+    const recentUsersResult = await db.query(`
+      SELECT email, is_premium, created_at
+      FROM users
+      ORDER BY created_at DESC
+      LIMIT 10
+    `);
+
+    res.json({
+      users: usersResult.rows[0],
+      usage: {
+        chats_today: usageResult.rows[0].chats_today,
+        images_today: imageUsageResult.rows[0].images_today
+      },
+      recent_users: recentUsersResult.rows
+    });
+  } catch (err) {
+    console.error('خطأ فـ الإحصائيات:', err);
+    res.status(500).json({ error: 'وقع مشكل فالسيرفر' });
+  }
+});
+
 // POST /api/admin/activate - فعل مستخدم كـ premium بالإيميل ديالو
 router.post('/activate', checkAdminSecret, async (req, res) => {
   const { email } = req.body;
