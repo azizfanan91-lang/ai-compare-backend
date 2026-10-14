@@ -47,6 +47,64 @@ router.get('/usage', requireAuth, async (req, res) => {
   }
 });
 
+// ---------- Free Playground Preview (سؤال واحد للزائر بلا تسجيل) ----------
+const previewUsage = new Map();
+const PREVIEW_MODELS = [
+  'openrouter/free',
+  'google/gemma-4-31b-it:free',
+  'nvidia/nemotron-3.5-lightning:free'
+];
+const PREVIEW_MAX_PROMPT = 1200;
+
+function previewKey(req) {
+  return String(req.ip || req.headers['x-forwarded-for'] || 'unknown').split(',')[0].trim();
+}
+
+router.post('/preview', async (req, res) => {
+  const prompt = String(req.body?.prompt || '').trim();
+  const requestedModels = Array.isArray(req.body?.models) ? req.body.models : [];
+  if (!prompt) return res.status(400).json({ error: 'كتب السؤال ديالك أولا' });
+  if (prompt.length > PREVIEW_MAX_PROMPT) return res.status(400).json({ error: `السؤال طويل بزاف (الحد ${PREVIEW_MAX_PROMPT} حرف)` });
+
+  const key = previewKey(req);
+  const today = new Date().toISOString().slice(0, 10);
+  const used = previewUsage.get(key);
+  if (used === today) {
+    return res.status(429).json({
+      error: 'استعملتي التجربة المجانية. سجل حساب باش تكمل المقارنة.',
+      preview_used: true
+    });
+  }
+
+  const models = [...new Set(requestedModels.filter(model => PREVIEW_MODELS.includes(model)))].slice(0, 3);
+  const candidates = models.length ? models : PREVIEW_MODELS.slice(0, 2);
+  const results = [];
+  try {
+    for (const model of candidates) {
+      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + process.env.OPENROUTER_API_KEY
+        },
+        body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt }], max_tokens: 900 })
+      });
+      const data = await response.json().catch(() => ({}));
+      results.push({
+        model,
+        text: response.ok && data.choices?.[0]?.message?.content
+          ? data.choices[0].message.content
+          : 'هاد النموذج مشغول حاليا، جرب المقارنة من بعد التسجيل.'
+      });
+    }
+    previewUsage.set(key, today);
+    res.json({ preview: true, results });
+  } catch (err) {
+    console.error('خطأ فـ Free Playground:', err.message);
+    res.status(502).json({ error: 'تعذر تشغيل التجربة المجانية حاليا، عاود جرب من بعد.' });
+  }
+});
+
 router.post('/chat', requireAuth, async (req, res) => {
   const { model, prompt } = req.body;
   if (!model || !prompt) return res.status(400).json({ error: 'خاص model و prompt' });
