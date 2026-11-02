@@ -190,28 +190,7 @@ const IMAGE_MODELS_TTL = 60 * 60 * 1000; // ساعة
 
 const POLLINATIONS_REFERRER = process.env.POLLINATIONS_REFERRER || 'usequerymix.com';
 
-// مسار تجريبي مؤقت للتشخيص فقط — كتقدر تفتحو مباشرة فالمتصفح بلا تسجيل دخول
-// امسحو من بعد ما نحلو المشكل
-router.get('/image/test', async (req, res) => {
-  try {
-    const url = `https://image.pollinations.ai/prompt/${encodeURIComponent('a red apple')}` +
-      `?model=flux&width=512&height=512&seed=1&nologo=true&referrer=${encodeURIComponent(POLLINATIONS_REFERRER)}`;
-    const imgHeaders = { 'Referer': `https://${POLLINATIONS_REFERRER}/` };
-    if (process.env.POLLINATIONS_TOKEN) imgHeaders['Authorization'] = 'Bearer ' + process.env.POLLINATIONS_TOKEN;
-
-    const r = await fetch(url, { headers: imgHeaders });
-    const ct = r.headers.get('content-type') || '';
-    if (!r.ok || !ct.startsWith('image/')) {
-      const body = await r.text().catch(() => '');
-      return res.json({ ok: false, status: r.status, contentType: ct, body: body.slice(0, 500) });
-    }
-    const buf = Buffer.from(await r.arrayBuffer());
-    res.set('Content-Type', ct);
-    res.send(buf);
-  } catch (err) {
-    res.json({ ok: false, crashed: true, message: err.message });
-  }
-});
+// تم حذف الـ endpoint التجريبي /image/test لأسباب أمنية
 
 router.get('/image/models', async (req, res) => {
   try {
@@ -269,7 +248,7 @@ router.post('/image', requireAuth, async (req, res) => {
 
     const seed = Math.floor(Math.random() * 1e9);
     const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}` +
-      `?model=${encodeURIComponent(model)}&width=${w}&height=${h}&seed=${seed}&nologo=true` +
+      `?model=\( {encodeURIComponent(model)}&width= \){w}&height=\( {h}&seed= \){seed}&nologo=true` +
       `&referrer=${encodeURIComponent(POLLINATIONS_REFERRER)}`;
 
     const imgHeaders = { 'Referer': `https://${POLLINATIONS_REFERRER}/` };
@@ -288,11 +267,11 @@ router.post('/image', requireAuth, async (req, res) => {
     const contentType = imgResponse.headers.get('content-type') || '';
 
     if (!imgResponse.ok || !contentType.startsWith('image/')) {
-      // كنسجلو التفاصيل فـ logs ديال Render، وكنرجعوها ليك مباشرة هنا مؤقتاً باش نشخصو بسرعة
+      // كنسجلو التفاصيل فـ logs ديال Render فقط، ما نرجعوهاش للمستخدم
       const bodyPreview = await imgResponse.text().catch(() => '');
       console.error('Pollinations image error:', imgResponse.status, contentType, bodyPreview.slice(0, 300));
       return res.status(502).json({
-        error: `تعذّر توليد الصورة — status:${imgResponse.status} type:${contentType || 'none'} body:${bodyPreview.slice(0, 200) || 'فارغ'}`
+        error: 'تعذّر توليد الصورة حالياً، عاود جرب من بعد.'
       });
     }
 
