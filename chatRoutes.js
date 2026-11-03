@@ -47,7 +47,7 @@ router.get('/usage', requireAuth, async (req, res) => {
   }
 });
 
-// ---------- Free Playground Preview (سؤال واحد للزائر بلا تسجيل) ----------
+// ---------- Free Playground Preview ----------
 const previewUsage = new Map();
 const PREVIEW_MODELS = [
   'openrouter/free',
@@ -64,21 +64,23 @@ router.post('/preview', async (req, res) => {
   const prompt = String(req.body?.prompt || '').trim();
   const requestedModels = Array.isArray(req.body?.models) ? req.body.models : [];
   if (!prompt) return res.status(400).json({ error: 'كتب السؤال ديالك أولا' });
-  if (prompt.length > PREVIEW_MAX_PROMPT) return res.status(400).json({ error: `السؤال طويل بزاف (الحد ${PREVIEW_MAX_PROMPT} حرف)` });
+  if (prompt.length > PREVIEW_MAX_PROMPT) {
+    return res.status(400).json({ error: `السؤال طويل بزاف (الحد ${PREVIEW_MAX_PROMPT} حرف)` });
+  }
 
   const key = previewKey(req);
   const today = new Date().toISOString().slice(0, 10);
-  const used = previewUsage.get(key);
-  if (used === today) {
+  if (previewUsage.get(key) === today) {
     return res.status(429).json({
       error: 'استعملتي التجربة المجانية. سجل حساب باش تكمل المقارنة.',
       preview_used: true
     });
   }
 
-  const models = [...new Set(requestedModels.filter(model => PREVIEW_MODELS.includes(model)))].slice(0, 3);
+  const models = [...new Set(requestedModels.filter(m => PREVIEW_MODELS.includes(m)))].slice(0, 3);
   const candidates = models.length ? models : PREVIEW_MODELS.slice(0, 2);
   const results = [];
+
   try {
     for (const model of candidates) {
       const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -87,7 +89,11 @@ router.post('/preview', async (req, res) => {
           'Content-Type': 'application/json',
           'Authorization': 'Bearer ' + process.env.OPENROUTER_API_KEY
         },
-        body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt }], max_tokens: 900 })
+        body: JSON.stringify({
+          model,
+          messages: [{ role: 'user', content: prompt }],
+          max_tokens: 900
+        })
       });
       const data = await response.json().catch(() => ({}));
       results.push({
@@ -113,6 +119,7 @@ router.post('/chat', requireAuth, async (req, res) => {
     const result = await db.query('SELECT is_premium, created_at FROM users WHERE id = $1', [req.userId]);
     const user = result.rows[0];
     if (!user) return res.status(401).json({ error: 'الحساب ماعادش موجود، عاود سجل الدخول' });
+
     const isPremium = !!user.is_premium;
     const trial = getTrialStatus(user.created_at);
     const hasAccess = isPremium || trial.inTrial;
@@ -130,9 +137,18 @@ router.post('/chat', requireAuth, async (req, res) => {
       [req.userId, chatToday]
     );
     const chatUsed = chatUsageResult.rows[0]?.count || 0;
+
     if (!isPremium && chatUsed >= FREE_CHAT_DAILY_LIMIT) {
       return res.status(429).json({
         error: `وصلتي للحد المجاني اليومي (${FREE_CHAT_DAILY_LIMIT} محادثات). عاود جرب غدا أو اشترك باش تكمل.`,
         limit_reached: true,
         chat_used: chatUsed,
-        chat_limit: FREE_CHAT
+        chat_limit: FREE_CHAT_DAILY_LIMIT
+      });
+    }
+
+    const candidates = [model, ...FREE_CHAT_FALLBACKS].filter((v, i, arr) => v && arr.indexOf(v) === i);
+    let data = null;
+    let lastError = 'النموذج غير متاح حاليا';
+
+    for (const candidate of
