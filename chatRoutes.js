@@ -176,8 +176,10 @@ async function askWithFailover(model, prompt, maxTokens) {
 // ملاحظة شفافة: هاد الأداة كتقارن النماذج، فخاص المستخدم يعرف إلا الجواب ماشي من النموذج اللي اختار
 function withFallbackNote(result, requestedModel) {
   if (!result.fallback) return result.text;
+  // \u2066 ... \u2069 = عزل الاتجاه (LTR) باش أسماء النماذج ما تتبعثرش داخل الجملة العربية
+  const ltr = (name) => '\u2066' + modelDisplayName(name) + '\u2069';
   return result.text +
-    `\n\n— ملاحظة: النموذج المطلوب (${modelDisplayName(requestedModel)}) كان مشغولا، وهاد الجواب جاء من نموذج بديل (${modelDisplayName(result.modelUsed)}).`;
+    `\n\n— ملاحظة: النموذج المطلوب ${ltr(requestedModel)} كان مشغولا، وهاد الجواب جاء من نموذج بديل ${ltr(result.modelUsed)}.`;
 }
 
 // مسموح غير النماذج المجانية (وإلا أي مستخدم يقدر يطلب نموذج مدفوع على حسابك)
