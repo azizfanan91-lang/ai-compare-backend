@@ -30,12 +30,17 @@ router.post('/', requireAuth, async (req, res) => {
   if (cleanContent.length > 100000) return res.status(400).json({ error: 'النتيجة طويلة بزاف للحفظ' });
 
   try {
+    // سقف حقيقي للإدراج (ماشي غير للعرض): الإدراج كيتم غير إلا ما وصلش المستخدم للحد
     const result = await db.query(
       `INSERT INTO saved_results (user_id, kind, title, content, model)
-       VALUES ($1, $2, $3, $4, $5)
+       SELECT $1, $2, $3, $4, $5
+       WHERE (SELECT COUNT(*) FROM saved_results WHERE user_id = $1) < $6
        RETURNING id, kind, title, content, model, created_at`,
-      [req.userId, String(kind).slice(0, 40), cleanTitle, cleanContent, model ? String(model).slice(0, 120) : null]
+      [req.userId, String(kind).slice(0, 40), cleanTitle, cleanContent, model ? String(model).slice(0, 120) : null, MAX_SAVED_RESULTS]
     );
+    if (!result.rows[0]) {
+      return res.status(409).json({ error: `وصلتي للحد الأقصى (${MAX_SAVED_RESULTS} نتيجة محفوظة). حيّد شي نتيجة قديمة باش تحفظ جديدة.` });
+    }
     res.status(201).json({ result: result.rows[0] });
   } catch (err) {
     console.error('خطأ فـ حفظ النتيجة:', err);
