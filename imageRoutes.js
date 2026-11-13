@@ -55,8 +55,12 @@ const MODELS = {
   }
 };
 
-const FREE_IMAGE_DAILY_LIMIT = parseInt(process.env.FREE_IMAGE_DAILY_LIMIT || '3', 10);
-const PREMIUM_IMAGE_DAILY_LIMIT = parseInt(process.env.PREMIUM_IMAGE_DAILY_LIMIT || '100', 10);
+const { FREE_IMAGE_DAILY_LIMIT, PREMIUM_IMAGE_DAILY_LIMIT } = require('./usageLimits');
+
+const IMAGE_TOTAL_BUDGET_MS = 80000;      // الفرونت كيوقف الطلب عند 90 ثانية
+const IMAGE_ATTEMPT_TIMEOUT_MS = 35000;
+const IMAGE_MAX_BYTES = 6 * 1024 * 1024;  // سقف حجم الصورة المقبولة
+const MAX_FALLBACKS = 2;                  // ما كنجربوش جميع النماذج
 
 const BLOCKED_KEYWORDS = [
   'child', 'kid', 'minor', 'طفل', 'أطفال',
@@ -120,72 +124,99 @@ router.post('/generate', requireAuth, async (req, res) => {
     const today = new Date().toISOString().split('T')[0];
     const userResult = await db.query('SELECT is_premium FROM users WHERE id = $1', [req.userId]);
     const isPremium = !!userResult.rows[0]?.is_premium;
-    const usageResult = await db.query(
-      'SELECT count FROM image_usage_log WHERE user_id = $1 AND date = $2',
-      [req.userId, today]
-    );
-    const used = usageResult.rows[0]?.count || 0;
     const imageLimit = isPremium ? PREMIUM_IMAGE_DAILY_LIMIT : FREE_IMAGE_DAILY_LIMIT;
 
-    if (used >= imageLimit) {
+    // حجز ذري للحصة قبل الاتصال بالمزود
+    const reserve = await db.query(`
+      INSERT INTO image_usage_log (user_id, date, count) VALUES ($1, $2, 1)
+      ON CONFLICT (user_id, date) DO UPDATE SET count = image_usage_log.count + 1
+      WHERE image_usage_log.count < $3
+      RETURNING count
+    `, [req.userId, today, imageLimit]);
+
+    if (reserve.rowCount === 0) {
       return res.status(429).json({
         error: `وصلتي للحد اليومي (${imageLimit} صورة). عاود جرب غدا أو اشترك باش تكمل.`,
         limit_reached: true
       });
     }
+    const used = reserve.rows[0].count; // العدد بعد الحجز
+
+    const release = async () => {
+      try {
+        await db.query(
+          'UPDATE image_usage_log SET count = GREATEST(count - 1, 0) WHERE user_id = $1 AND date = $2',
+          [req.userId, today]
+        );
+      } catch (e) { console.error('release error:', e.message); }
+    };
 
     let arrayBuffer = null;
     let imageContentType = 'image/png';
     let usedModel = selectedModel;
-    let lastError = null;
-    for (const candidate of imageCandidates) {
-      let response;
-      if (candidate.provider === 'pollinations') {
-        const pollinationsUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}` +
-          `?model=${encodeURIComponent(candidate.pollinationsModel)}&width=${w}&height=${h}` +
-          `&seed=${Math.floor(Math.random() * 1e9)}&nologo=true`;
-        const headers = { Referer: 'https://usequerymix.com/' };
-        if (process.env.POLLINATIONS_TOKEN) headers.Authorization = `Bearer ${process.env.POLLINATIONS_TOKEN}`;
-        response = await fetch(pollinationsUrl, { headers });
-      } else if (accountId && apiToken) {
-        const cfUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${candidate.cfModel}`;
-        const body = candidate.params?.prompt ? { prompt } : { prompt, ...candidate.params };
-        response = await fetch(cfUrl, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${apiToken}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify(body)
-        });
-      } else {
-        continue;
+    const startedAt = Date.now();
+
+    try {
+      for (const candidate of imageCandidates.slice(0, 1 + MAX_FALLBACKS)) {
+        const remaining = IMAGE_TOTAL_BUDGET_MS - (Date.now() - startedAt);
+        if (remaining < 8000) break;
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), Math.min(IMAGE_ATTEMPT_TIMEOUT_MS, remaining));
+        try {
+          let response;
+          if (candidate.provider === 'pollinations') {
+            const pollinationsUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}` +
+              `?model=${encodeURIComponent(candidate.pollinationsModel)}&width=${w}&height=${h}` +
+              `&seed=${Math.floor(Math.random() * 1e9)}&nologo=true`;
+            const headers = { Referer: 'https://usequerymix.com/' };
+            if (process.env.POLLINATIONS_TOKEN) headers.Authorization = `Bearer ${process.env.POLLINATIONS_TOKEN}`;
+            response = await fetch(pollinationsUrl, { headers, signal: controller.signal });
+          } else if (accountId && apiToken) {
+            const cfUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${candidate.cfModel}`;
+            const body = candidate.params?.prompt ? { prompt } : { prompt, ...candidate.params };
+            response = await fetch(cfUrl, {
+              method: 'POST',
+              headers: { 'Authorization': `Bearer ${apiToken}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+              signal: controller.signal
+            });
+          } else {
+            continue;
+          }
+          if (!response.ok) {
+            console.warn(`Image model failed (${candidate.name}): HTTP ${response.status}`);
+            continue;
+          }
+          const declared = parseInt(response.headers.get('content-length') || '0', 10);
+          if (declared > IMAGE_MAX_BYTES) { console.warn('image too large (declared)'); continue; }
+          const buf = await response.arrayBuffer();
+          if (buf.byteLength > IMAGE_MAX_BYTES) { console.warn('image too large'); continue; }
+          arrayBuffer = buf;
+          imageContentType = response.headers.get('content-type') || imageContentType;
+          usedModel = candidate;
+          break;
+        } catch (e) {
+          console.warn(`Image model error (${candidate.name}):`, e.name === 'AbortError' ? 'timeout' : e.message);
+        } finally {
+          clearTimeout(timer);
+        }
       }
-      if (response.ok) {
-        arrayBuffer = await response.arrayBuffer();
-        imageContentType = response.headers.get('content-type') || imageContentType;
-        usedModel = candidate;
-        break;
-      }
-      const errorText = await response.text().catch(() => '');
-      lastError = errorText.slice(0, 160) || `HTTP ${response.status}`;
-      console.warn(`Image model failed (${candidate.name}): ${lastError}`);
+    } catch (e) {
+      await release();
+      throw e;
     }
+
     if (!arrayBuffer) {
-      return res.status(502).json({ error: 'تعذّر توليد الصورة بالنماذج المجانية: ' + (lastError || 'حاول مرة أخرى') });
+      await release(); // الفشل ما كيتحسبش على المستخدم
+      return res.status(502).json({ error: 'تعذّر توليد الصورة حاليا، جرب وصفاً آخر أو نموذجاً آخر بعد شوية.' });
     }
     const base64 = Buffer.from(arrayBuffer).toString('base64');
     const dataUri = `data:${imageContentType};base64,${base64}`;
 
-    await db.query(`
-      INSERT INTO image_usage_log (user_id, date, count) VALUES ($1, $2, 1)
-      ON CONFLICT (user_id, date) DO UPDATE SET count = image_usage_log.count + 1
-    `, [req.userId, today]);
-
     res.json({
       image: dataUri,
       model: usedModel.name,
-      remaining: Math.max(0, imageLimit - (used + 1)),
+      remaining: Math.max(0, imageLimit - used),
       limit: imageLimit
     });
   } catch (err) {
