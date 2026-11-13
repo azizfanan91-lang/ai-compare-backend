@@ -9,14 +9,15 @@ const chatRoutes = require('./chatRoutes');
 const adminRoutes = require('./adminRoutes');
 const paymentRoutes = require('./paymentRoutes');
 const imageRoutes = require('./imageRoutes');
+const savedRoutes = require('./savedRoutes');
 
 const app = express();
 
-// Render كيحط proxy قدام السيرفر: بلا هادي rate limit كيشوف IP ديال Render ماشي ديال المستخدم
+// Render كيحط proxy قدام السيرفر: بلا هادي rate limit والمعاينة كيشوفو IP ديال Render
 app.set('trust proxy', 1);
 
 app.use(helmet({
-  contentSecurityPolicy: false,      // الواجهة فـ دومين آخر وكاتستعمل inline scripts
+  contentSecurityPolicy: false,
   crossOriginEmbedderPolicy: false,
   crossOriginResourcePolicy: { policy: 'cross-origin' }
 }));
@@ -25,6 +26,7 @@ app.use(helmet({
 const allowedOrigins = [
   'https://usequerymix.com',
   'https://www.usequerymix.com',
+  'https://azizfanan91-lang.github.io',
   'http://localhost:5500',
   'http://127.0.0.1:5500'
 ];
@@ -35,27 +37,25 @@ app.use(cors({
   }
 }));
 
+// الحجم كيسع النصوص الطويلة + النتائج المحفوظة (100000 حرف)
 app.use(express.json({ limit: '1mb' }));
 
-// Rate limits (فـ الذاكرة: كافية دابا. Redis غير من بعد ما يكبر الموقع)
 const mk = (windowMs, max) => rateLimit({
   windowMs, max, standardHeaders: true, legacyHeaders: false,
   message: { error: 'طلبات بزاف، عاود جرب من بعد شوية' }
 });
-app.use('/api/auth', mk(15 * 60 * 1000, 30));   // حماية login/signup من brute force
+app.use('/api/auth', mk(15 * 60 * 1000, 30));
 app.use('/api/admin', mk(15 * 60 * 1000, 30));
-app.use('/api', mk(60 * 1000, 60));              // عام
+app.use('/api', mk(60 * 1000, 120));
 
-// الـ webhook ديال Gumroad ماشي متأثر: كايدوز غير بـ seller_id صحيح
 app.use('/api/auth', authRoutes);
-app.use('/api', chatRoutes);
+app.use('/api', chatRoutes);                 // /usage /preview /chat
 app.use('/api/admin', adminRoutes);
 app.use('/api/payment', paymentRoutes);
-// الفرونت كيستعمل /api/image (مفرد)، السيرفر القديم كان /api/images (جمع): ندعمو جوج
-app.use('/api/image', imageRoutes);
-app.use('/api/images', imageRoutes);
+app.use('/api/images', imageRoutes);         // /models /usage /generate
+app.use('/api/saved-results', savedRoutes);
 
-// خفيف: لـ cron-job / UptimeRobot، ما كايمس DB
+// خفيف: لـ cron-job / UptimeRobot، ما كيمس DB
 app.get('/health', (req, res) => res.status(200).send('ok'));
 
 app.get('/', (req, res) => {
