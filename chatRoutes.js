@@ -104,17 +104,36 @@ function modelDisplayName(id) {
   return String(id).replace(/^@cf\/[^/]+\//, '').replace(/:free$/, '');
 }
 
-// كاش قصير لأجوبة المزودين البدلاء: ملي كتفشل عدة نماذج فـ نفس الطلب كنصرفو حصة وحدة
+// الفرونت كيبعت كل النماذج فـ نفس الوقت: كنشاركو نفس الطلب البديل (حتى وهو جاري) باش ما نصرفوش حصة المزود البديل بلا فايدة
 const fallbackCache = new Map();
 const FALLBACK_CACHE_TTL_MS = 2 * 60 * 1000;
 function cacheKey(provider, prompt) {
   return provider + ':' + crypto.createHash('sha256').update(prompt).digest('hex');
 }
 
+async function tryProvider(p, model, prompt, maxTokens, timeoutMs) {
+  try {
+    const r = await p.run(model, prompt, maxTokens, timeoutMs);
+    if (r.response.ok && r.text) return { ok: true, text: r.text };
+    const limited = r.response.status === 429 || /rate limit/i.test(r.msg);
+    if (limited) {
+      const daily = /per[- ]day|per day|TPD|RPD|neurons/i.test(r.msg);
+      p.blockedUntil = daily ? r.dailyBlockUntil : Date.now() + 60000;
+      console.warn(`[${p.name}] rate limit (${daily ? 'daily' : 'minute'}) until`, new Date(p.blockedUntil).toISOString());
+      return { ok: false, limited: true };
+    }
+    console.warn(`[${p.name}] failed:`, r.response.status, r.msg);
+    return { ok: false, limited: false };
+  } catch (err) {
+    console.warn(`[${p.name}] error:`, err.name === 'AbortError' ? 'timeout' : err.message);
+    return { ok: false, limited: false };
+  }
+}
+
 /**
  * كيجرب المزودين بالترتيب. كيرجع:
  *  { ok:true, text, provider, modelUsed, fallback }
- *  { ok:false, rateLimited }   (rateLimited = كاع المزودين محظورين مؤقتا)
+ *  { ok:false, rateLimited }   (rateLimited = المزودين محظورين مؤقتا، ماشي عطب آخر)
  */
 async function askWithFailover(model, prompt, maxTokens) {
   const startedAt = Date.now();
@@ -125,41 +144,31 @@ async function askWithFailover(model, prompt, maxTokens) {
     if (!p.enabled()) continue;
     if (Date.now() < p.blockedUntil) { sawRateLimit = true; continue; }
 
-    const isFallback = !p.usesRequestedModel;
-    const key = isFallback ? cacheKey(p.name, prompt) : null;
-    if (key) {
-      const hit = fallbackCache.get(key);
-      if (hit && Date.now() - hit.at < FALLBACK_CACHE_TTL_MS) {
-        return { ok: true, text: hit.text, provider: p.name, modelUsed: p.label(model), fallback: true };
-      }
-    }
-
     const remaining = CHAT_TOTAL_BUDGET_MS - (Date.now() - startedAt);
     if (remaining < 4000) break;
+    const timeoutMs = Math.min(CHAT_ATTEMPT_TIMEOUT_MS, remaining);
+    const isFallback = !p.usesRequestedModel;
 
-    try {
-      const r = await p.run(model, prompt, maxTokens, Math.min(CHAT_ATTEMPT_TIMEOUT_MS, remaining));
-      if (r.response.ok && r.text) {
-        if (key) {
-          if (fallbackCache.size > 200) fallbackCache.clear();
-          fallbackCache.set(key, { text: r.text, at: Date.now() });
-        }
-        return { ok: true, text: r.text, provider: p.name, modelUsed: p.label(model), fallback: isFallback };
+    let attempt;
+    if (isFallback) {
+      const key = cacheKey(p.name, prompt);
+      let entry = fallbackCache.get(key);
+      if (!entry || Date.now() - entry.at > FALLBACK_CACHE_TTL_MS) {
+        if (fallbackCache.size > 200) fallbackCache.clear();
+        entry = { at: Date.now(), promise: tryProvider(p, model, prompt, maxTokens, timeoutMs) };
+        fallbackCache.set(key, entry);
+        const mine = entry;
+        mine.promise.then((r) => { if (!r.ok && fallbackCache.get(key) === mine) fallbackCache.delete(key); });
       }
-      const limited = r.response.status === 429 || /rate limit/i.test(r.msg);
-      if (limited) {
-        const daily = /per[- ]day|per day|TPD|RPD|neurons/i.test(r.msg);
-        p.blockedUntil = daily ? r.dailyBlockUntil : Date.now() + 60000;
-        sawRateLimit = true;
-        console.warn(`[${p.name}] rate limit (${daily ? 'daily' : 'minute'}) until`, new Date(p.blockedUntil).toISOString());
-      } else {
-        sawOtherError = true;
-        console.warn(`[${p.name}] failed:`, r.response.status, r.msg);
-      }
-    } catch (err) {
-      sawOtherError = true;
-      console.warn(`[${p.name}] error:`, err.name === 'AbortError' ? 'timeout' : err.message);
+      attempt = await entry.promise;
+    } else {
+      attempt = await tryProvider(p, model, prompt, maxTokens, timeoutMs);
     }
+
+    if (attempt.ok) {
+      return { ok: true, text: attempt.text, provider: p.name, modelUsed: p.label(model), fallback: isFallback };
+    }
+    if (attempt.limited) sawRateLimit = true; else sawOtherError = true;
   }
   return { ok: false, rateLimited: sawRateLimit && !sawOtherError };
 }
