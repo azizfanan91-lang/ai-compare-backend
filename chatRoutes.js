@@ -1,4 +1,5 @@
 const express = require('express');
+const crypto = require('crypto');
 const db = require('./database');
 const { requireAuth } = require('./authMiddleware');
 const {
@@ -9,15 +10,166 @@ const {
 
 const router = express.Router();
 
-const FREE_CHAT_FALLBACKS = [
-  'openrouter/free',
-  'google/gemma-4-31b-it:free',
-  'nvidia/nemotron-3.5-lightning:free'
-];
-
 const MAX_PROMPT_CHARS = 20000;       // الفرونت كيرسل حتى ~14000 + التعليمات
 const CHAT_TOTAL_BUDGET_MS = 55000;   // الفرونت كيوقف الطلب عند 60 ثانية
-const CHAT_ATTEMPT_TIMEOUT_MS = 25000;
+const CHAT_ATTEMPT_TIMEOUT_MS = 20000;
+
+// ---------------------------------------------------------------------------
+// المزودون: OpenRouter (الأول) ← Groq ← Cloudflare Workers AI
+// المزودين البدلاء كيخدمو غير إلا كانو معرفين فـ Environment (ما كاين حتى تغيير إلا ما زدتيهمش)
+// ---------------------------------------------------------------------------
+const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+const CF_TEXT_MODEL = process.env.CF_TEXT_MODEL || '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
+
+function nextUtcMidnight() {
+  const d = new Date();
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1);
+}
+
+async function postJson(url, headers, body, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...headers },
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+    const data = await response.json().catch(() => ({}));
+    return { response, data };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+const PROVIDERS = [
+  {
+    name: 'openrouter',
+    label: (model) => model,
+    blockedUntil: 0,
+    enabled: () => !!process.env.OPENROUTER_API_KEY,
+    usesRequestedModel: true,
+    async run(model, prompt, maxTokens, timeoutMs) {
+      const { response, data } = await postJson(
+        'https://openrouter.ai/api/v1/chat/completions',
+        { Authorization: 'Bearer ' + process.env.OPENROUTER_API_KEY },
+        { model, messages: [{ role: 'user', content: prompt }], max_tokens: maxTokens },
+        timeoutMs
+      );
+      const text = data?.choices?.[0]?.message?.content || null;
+      const msg = data?.error?.message ? String(data.error.message).slice(0, 200) : '';
+      return { response, text, msg, dailyBlockUntil: nextUtcMidnight() };
+    }
+  },
+  {
+    name: 'groq',
+    label: () => GROQ_MODEL,
+    blockedUntil: 0,
+    enabled: () => !!process.env.GROQ_API_KEY,
+    async run(_model, prompt, maxTokens, timeoutMs) {
+      const { response, data } = await postJson(
+        'https://api.groq.com/openai/v1/chat/completions',
+        { Authorization: 'Bearer ' + process.env.GROQ_API_KEY },
+        { model: GROQ_MODEL, messages: [{ role: 'user', content: prompt }], max_tokens: maxTokens },
+        timeoutMs
+      );
+      const text = data?.choices?.[0]?.message?.content || null;
+      const msg = data?.error?.message ? String(data.error.message).slice(0, 200) : '';
+      return { response, text, msg, dailyBlockUntil: Date.now() + 60 * 60 * 1000 };
+    }
+  },
+  {
+    name: 'cloudflare',
+    label: () => CF_TEXT_MODEL,
+    blockedUntil: 0,
+    enabled: () => !!(process.env.CLOUDFLARE_ACCOUNT_ID && process.env.CLOUDFLARE_API_TOKEN),
+    async run(_model, prompt, maxTokens, timeoutMs) {
+      const { response, data } = await postJson(
+        `https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/ai/run/${CF_TEXT_MODEL}`,
+        { Authorization: 'Bearer ' + process.env.CLOUDFLARE_API_TOKEN },
+        { messages: [{ role: 'user', content: prompt }], max_tokens: maxTokens },
+        timeoutMs
+      );
+      // Cloudflare كيغلف الجواب فـ result، وكنقبلو الشكلين
+      const text = (data?.result?.response ?? data?.response) || null;
+      const msg = Array.isArray(data?.errors) && data.errors[0]?.message
+        ? String(data.errors[0].message).slice(0, 200) : '';
+      return { response, text, msg, dailyBlockUntil: Date.now() + 60 * 60 * 1000 };
+    }
+  }
+];
+
+function modelDisplayName(id) {
+  return String(id).replace(/^@cf\/[^/]+\//, '').replace(/:free$/, '');
+}
+
+// كاش قصير لأجوبة المزودين البدلاء: ملي كتفشل عدة نماذج فـ نفس الطلب كنصرفو حصة وحدة
+const fallbackCache = new Map();
+const FALLBACK_CACHE_TTL_MS = 2 * 60 * 1000;
+function cacheKey(provider, prompt) {
+  return provider + ':' + crypto.createHash('sha256').update(prompt).digest('hex');
+}
+
+/**
+ * كيجرب المزودين بالترتيب. كيرجع:
+ *  { ok:true, text, provider, modelUsed, fallback }
+ *  { ok:false, rateLimited }   (rateLimited = كاع المزودين محظورين مؤقتا)
+ */
+async function askWithFailover(model, prompt, maxTokens) {
+  const startedAt = Date.now();
+  let sawRateLimit = false;
+  let sawOtherError = false;
+
+  for (const p of PROVIDERS) {
+    if (!p.enabled()) continue;
+    if (Date.now() < p.blockedUntil) { sawRateLimit = true; continue; }
+
+    const isFallback = !p.usesRequestedModel;
+    const key = isFallback ? cacheKey(p.name, prompt) : null;
+    if (key) {
+      const hit = fallbackCache.get(key);
+      if (hit && Date.now() - hit.at < FALLBACK_CACHE_TTL_MS) {
+        return { ok: true, text: hit.text, provider: p.name, modelUsed: p.label(model), fallback: true };
+      }
+    }
+
+    const remaining = CHAT_TOTAL_BUDGET_MS - (Date.now() - startedAt);
+    if (remaining < 4000) break;
+
+    try {
+      const r = await p.run(model, prompt, maxTokens, Math.min(CHAT_ATTEMPT_TIMEOUT_MS, remaining));
+      if (r.response.ok && r.text) {
+        if (key) {
+          if (fallbackCache.size > 200) fallbackCache.clear();
+          fallbackCache.set(key, { text: r.text, at: Date.now() });
+        }
+        return { ok: true, text: r.text, provider: p.name, modelUsed: p.label(model), fallback: isFallback };
+      }
+      const limited = r.response.status === 429 || /rate limit/i.test(r.msg);
+      if (limited) {
+        const daily = /per[- ]day|per day|TPD|RPD|neurons/i.test(r.msg);
+        p.blockedUntil = daily ? r.dailyBlockUntil : Date.now() + 60000;
+        sawRateLimit = true;
+        console.warn(`[${p.name}] rate limit (${daily ? 'daily' : 'minute'}) until`, new Date(p.blockedUntil).toISOString());
+      } else {
+        sawOtherError = true;
+        console.warn(`[${p.name}] failed:`, r.response.status, r.msg);
+      }
+    } catch (err) {
+      sawOtherError = true;
+      console.warn(`[${p.name}] error:`, err.name === 'AbortError' ? 'timeout' : err.message);
+    }
+  }
+  return { ok: false, rateLimited: sawRateLimit && !sawOtherError };
+}
+
+// ملاحظة شفافة: هاد الأداة كتقارن النماذج، فخاص المستخدم يعرف إلا الجواب ماشي من النموذج اللي اختار
+function withFallbackNote(result, requestedModel) {
+  if (!result.fallback) return result.text;
+  return result.text +
+    `\n\n— ملاحظة: النموذج المطلوب (${modelDisplayName(requestedModel)}) كان مشغولا، وهاد الجواب جاء من نموذج بديل (${modelDisplayName(result.modelUsed)}).`;
+}
 
 // مسموح غير النماذج المجانية (وإلا أي مستخدم يقدر يطلب نموذج مدفوع على حسابك)
 const FREE_MODEL_RE = /^[A-Za-z0-9._\-\/]{1,100}:free$/;
@@ -31,57 +183,6 @@ function getTrialStatus(createdAt) {
   const diffDays = (now - createdDate) / (1000 * 60 * 60 * 24);
   const daysLeft = Math.max(0, TRIAL_DAYS - diffDays);
   return { inTrial: diffDays < TRIAL_DAYS, daysLeft: Math.ceil(daysLeft) };
-}
-
-// إلا OpenRouter قال لينا "rate limit" ما كنعاودوش نبعثو طلبات حتى يتفك الحظر
-// (كل طلب زايد كيضيع من الحصة ديال الحساب كامل)
-let providerBlockedUntil = 0;
-function nextUtcMidnight() {
-  const d = new Date();
-  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1);
-}
-
-async function callOpenRouter(model, prompt, maxTokens, timeoutMs) {
-  if (Date.now() < providerBlockedUntil) {
-    return { ok: false, rateLimited: true, error: 'provider blocked' };
-  }
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + process.env.OPENROUTER_API_KEY
-      },
-      body: JSON.stringify({
-        model,
-        messages: [{ role: 'user', content: prompt }],
-        max_tokens: maxTokens
-      }),
-      signal: controller.signal
-    });
-    const data = await response.json().catch(() => ({}));
-    const text = data && data.choices && data.choices[0] && data.choices[0].message
-      ? data.choices[0].message.content : null;
-    if (!response.ok || data.error || !text) {
-      const msg = data && data.error && data.error.message ? String(data.error.message).slice(0, 200) : '';
-      const limited = response.status === 429 || /rate limit/i.test(msg);
-      if (limited) {
-        const daily = /per-day|per day/i.test(msg);
-        providerBlockedUntil = daily ? nextUtcMidnight() : Date.now() + 60000;
-        console.warn('OpenRouter rate limit (' + (daily ? 'daily' : 'minute') + '), blocking calls until',
-          new Date(providerBlockedUntil).toISOString());
-        return { ok: false, rateLimited: true, error: msg || 'rate limit' };
-      }
-      return { ok: false, error: msg || ('HTTP ' + response.status) };
-    }
-    return { ok: true, text };
-  } catch (err) {
-    return { ok: false, error: err.name === 'AbortError' ? 'timeout' : err.message };
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 router.get('/usage', requireAuth, async (req, res) => {
@@ -123,7 +224,7 @@ const PREVIEW_MODELS = [
 const PREVIEW_MAX_PROMPT = 1200;
 
 function previewKey(req) {
-  // كنعتمدو على req.ip (trust proxy مفعّل فـ server.js)، ماشي على header يقدر المستخدم يزوّرو
+  // req.ip (trust proxy مفعّل فـ server.js)، ماشي header يقدر المستخدم يزوّرو
   return String(req.ip || 'unknown');
 }
 
@@ -148,19 +249,17 @@ router.post('/preview', async (req, res) => {
   const candidates = models.length ? models : PREVIEW_MODELS.slice(0, 2);
 
   try {
-    // بالتوازي: الوقت = أبطأ نموذج، ماشي مجموع النماذج
     const results = await Promise.all(candidates.map(async (model) => {
-      const r = await callOpenRouter(model, prompt, 900, 30000);
+      const r = await askWithFailover(model, prompt, 900);
       return {
         model,
-        text: r.ok ? r.text
+        ok: r.ok,
+        text: r.ok ? withFallbackNote(r, model)
           : (r.rateLimited ? 'النماذج المجانية وصلات للحد اليومي مؤقتا، عاود جرب من بعد.'
-                           : 'هاد النموذج مشغول حاليا، جرب المقارنة من بعد التسجيل.'),
-        ok: r.ok
+                           : 'هاد النموذج مشغول حاليا، جرب المقارنة من بعد التسجيل.')
       };
     }));
 
-    // ما كنحسبوش التجربة إلا نجح على الأقل نموذج واحد
     if (results.some(r => r.ok)) {
       if (previewUsage.size > 5000) {
         for (const [k, d] of previewUsage) if (d !== today) previewUsage.delete(k);
@@ -210,7 +309,7 @@ router.post('/chat', requireAuth, async (req, res) => {
       });
     }
 
-    // حجز ذري للحصة قبل ما نتصلو بـ OpenRouter
+    // حجز ذري للحصة قبل الاتصال بأي مزود
     const cap = isPremium ? PREMIUM_CHAT_HARD_LIMIT : FREE_CHAT_DAILY_LIMIT;
     const reserve = await db.query(`
       INSERT INTO usage_log (user_id, date, count) VALUES ($1, $2, 1)
@@ -231,30 +330,13 @@ router.post('/chat', requireAuth, async (req, res) => {
     }
     reserved = true;
 
-    // النموذج المطلوب أولا، ومن بعد البدائل المجانية، فـ حدود 55 ثانية
-    // بديل واحد فقط (كل محاولة زايدة كتستهلك من الحد اليومي ديال OpenRouter)
-    const candidates = [model, ...FREE_CHAT_FALLBACKS].filter((v, i, arr) => v && arr.indexOf(v) === i).slice(0, 2);
-    let rateLimited = false;
-    const startedAt = Date.now();
-    let text = null;
-    let usedModel = null;
-    let lastError = 'النموذج غير متاح حاليا';
+    const r = await askWithFailover(model, prompt, 1500);
 
-    for (const candidate of candidates) {
-      const remaining = CHAT_TOTAL_BUDGET_MS - (Date.now() - startedAt);
-      if (remaining < 5000) break;
-      const r = await callOpenRouter(candidate, prompt, 1500, Math.min(CHAT_ATTEMPT_TIMEOUT_MS, remaining));
-      if (r.ok) { text = r.text; usedModel = candidate; break; }
-      lastError = r.error;
-      console.warn('chat candidate failed:', candidate, r.error);
-      if (r.rateLimited) { rateLimited = true; break; }  // ما كنزيدوش طلبات
-    }
-
-    if (!text) {
+    if (!r.ok) {
       // الفشل ما كيتحسبش على المستخدم
       await releaseReservation(req.userId, today);
       reserved = false;
-      if (rateLimited) {
+      if (r.rateLimited) {
         return res.status(503).json({
           error: 'النماذج المجانية وصلات للحد اليومي ديالها مؤقتا. عاود جرب من بعد (كيتجدد كل يوم).',
           provider_limit: true
@@ -263,7 +345,12 @@ router.post('/chat', requireAuth, async (req, res) => {
       return res.status(502).json({ error: 'النموذج مشغول حاليا، جرب مرة أخرى بعد شوية' });
     }
 
-    res.json({ text, model_used: usedModel, fallback: usedModel !== model });
+    res.json({
+      text: withFallbackNote(r, model),
+      model_used: r.modelUsed,
+      provider: r.provider,
+      fallback: r.fallback
+    });
   } catch (err) {
     if (reserved) await releaseReservation(req.userId, today);
     console.error('chat error:', err.message);
