@@ -1,14 +1,18 @@
-// Routes خاصة بيك أنت غير (Admin) — باش تفعل المشتركين يدويا بعد ما يخلصو عبر PayPal
+// Routes خاصة بيك أنت غير (Admin) — باش تفعل المشتركين يدويا بعد ما يخلصو عبر Gumroad
 // محمي بكلمة سر سرية (ADMIN_SECRET) خاصك تحطها فـ Environment Variables
 
+const crypto = require('crypto');
 const express = require('express');
 const db = require('./database');
 
 const router = express.Router();
 
 function checkAdminSecret(req, res, next) {
-  const secret = req.headers['x-admin-secret'];
-  if (!secret || secret !== process.env.ADMIN_SECRET) {
+  const secret = String(req.headers['x-admin-secret'] || '');
+  const expected = String(process.env.ADMIN_SECRET || '');
+  const a = Buffer.from(secret), b = Buffer.from(expected);
+  // مقارنة بوقت ثابت، ورفض كامل إلا ADMIN_SECRET ماشي معرّف
+  if (!expected || a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
     return res.status(403).json({ error: 'ما عندكش الصلاحية' });
   }
   next();
@@ -36,7 +40,7 @@ router.post('/activate', checkAdminSecret, async (req, res) => {
 
   try {
     const result = await db.query(
-      'UPDATE users SET is_premium = 1 WHERE email = $1',
+      'UPDATE users SET is_premium = 1 WHERE LOWER(email) = LOWER($1)',
       [email]
     );
 
@@ -60,7 +64,7 @@ router.post('/deactivate', checkAdminSecret, async (req, res) => {
 
   try {
     const result = await db.query(
-      'UPDATE users SET is_premium = 0 WHERE email = $1',
+      'UPDATE users SET is_premium = 0 WHERE LOWER(email) = LOWER($1)',
       [email]
     );
 
