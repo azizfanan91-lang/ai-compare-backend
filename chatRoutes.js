@@ -33,7 +33,18 @@ function getTrialStatus(createdAt) {
   return { inTrial: diffDays < TRIAL_DAYS, daysLeft: Math.ceil(daysLeft) };
 }
 
+// إلا OpenRouter قال لينا "rate limit" ما كنعاودوش نبعثو طلبات حتى يتفك الحظر
+// (كل طلب زايد كيضيع من الحصة ديال الحساب كامل)
+let providerBlockedUntil = 0;
+function nextUtcMidnight() {
+  const d = new Date();
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1);
+}
+
 async function callOpenRouter(model, prompt, maxTokens, timeoutMs) {
+  if (Date.now() < providerBlockedUntil) {
+    return { ok: false, rateLimited: true, error: 'provider blocked' };
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -55,6 +66,14 @@ async function callOpenRouter(model, prompt, maxTokens, timeoutMs) {
       ? data.choices[0].message.content : null;
     if (!response.ok || data.error || !text) {
       const msg = data && data.error && data.error.message ? String(data.error.message).slice(0, 200) : '';
+      const limited = response.status === 429 || /rate limit/i.test(msg);
+      if (limited) {
+        const daily = /per-day|per day/i.test(msg);
+        providerBlockedUntil = daily ? nextUtcMidnight() : Date.now() + 60000;
+        console.warn('OpenRouter rate limit (' + (daily ? 'daily' : 'minute') + '), blocking calls until',
+          new Date(providerBlockedUntil).toISOString());
+        return { ok: false, rateLimited: true, error: msg || 'rate limit' };
+      }
       return { ok: false, error: msg || ('HTTP ' + response.status) };
     }
     return { ok: true, text };
@@ -134,7 +153,9 @@ router.post('/preview', async (req, res) => {
       const r = await callOpenRouter(model, prompt, 900, 30000);
       return {
         model,
-        text: r.ok ? r.text : 'هاد النموذج مشغول حاليا، جرب المقارنة من بعد التسجيل.',
+        text: r.ok ? r.text
+          : (r.rateLimited ? 'النماذج المجانية وصلات للحد اليومي مؤقتا، عاود جرب من بعد.'
+                           : 'هاد النموذج مشغول حاليا، جرب المقارنة من بعد التسجيل.'),
         ok: r.ok
       };
     }));
@@ -211,7 +232,9 @@ router.post('/chat', requireAuth, async (req, res) => {
     reserved = true;
 
     // النموذج المطلوب أولا، ومن بعد البدائل المجانية، فـ حدود 55 ثانية
-    const candidates = [model, ...FREE_CHAT_FALLBACKS].filter((v, i, arr) => v && arr.indexOf(v) === i);
+    // بديل واحد فقط (كل محاولة زايدة كتستهلك من الحد اليومي ديال OpenRouter)
+    const candidates = [model, ...FREE_CHAT_FALLBACKS].filter((v, i, arr) => v && arr.indexOf(v) === i).slice(0, 2);
+    let rateLimited = false;
     const startedAt = Date.now();
     let text = null;
     let usedModel = null;
@@ -224,12 +247,19 @@ router.post('/chat', requireAuth, async (req, res) => {
       if (r.ok) { text = r.text; usedModel = candidate; break; }
       lastError = r.error;
       console.warn('chat candidate failed:', candidate, r.error);
+      if (r.rateLimited) { rateLimited = true; break; }  // ما كنزيدوش طلبات
     }
 
     if (!text) {
       // الفشل ما كيتحسبش على المستخدم
       await releaseReservation(req.userId, today);
       reserved = false;
+      if (rateLimited) {
+        return res.status(503).json({
+          error: 'النماذج المجانية وصلات للحد اليومي ديالها مؤقتا. عاود جرب من بعد (كيتجدد كل يوم).',
+          provider_limit: true
+        });
+      }
       return res.status(502).json({ error: 'النموذج مشغول حاليا، جرب مرة أخرى بعد شوية' });
     }
 
