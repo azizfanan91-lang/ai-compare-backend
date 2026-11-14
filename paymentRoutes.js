@@ -24,7 +24,7 @@ function safeEqual(a, b) {
 async function gumroadGet(path) {
   if (!process.env.GUMROAD_ACCESS_TOKEN) throw new Error('GUMROAD_ACCESS_TOKEN ناقص');
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 10000);
+  const timer = setTimeout(() => controller.abort(), 4000);
   try {
     const r = await fetch(GUMROAD_API + path, {
       headers: { Authorization: 'Bearer ' + process.env.GUMROAD_ACCESS_TOKEN },
