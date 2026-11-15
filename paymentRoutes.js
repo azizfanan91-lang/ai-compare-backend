@@ -88,12 +88,12 @@ async function setPremium(email, on, subscriptionId) {
 }
 
 // POST /api/payment/gumroad-webhook
-router.post('/gumroad-webhook', upload.none(), async (req, res) => {
+router.post('/gumroad-webhook', express.urlencoded({ extended: true, limit: '100kb' }), upload.none(), async (req, res) => {
   const body = req.body || {};
 
   // 1) الفحص الأول: seller_id (ماشي كافي وحدو، كنتحققو من Gumroad من بعد)
   if (!process.env.GUMROAD_SELLER_ID || !safeEqual(body.seller_id, process.env.GUMROAD_SELLER_ID)) {
-    console.warn('Ping مرفوض: seller_id ماشي مطابق');
+    console.warn('Ping مرفوض: seller_id ماشي مطابق | content-type:', req.headers['content-type'], '| keys:', Object.keys(body).length, '| env set:', !!process.env.GUMROAD_SELLER_ID);
     return res.status(403).send('Forbidden');
   }
 
