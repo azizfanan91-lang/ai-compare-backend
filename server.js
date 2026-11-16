@@ -45,6 +45,8 @@ const mk = (windowMs, max) => rateLimit({
   message: { error: 'طلبات بزاف، عاود جرب من بعد شوية' }
 });
 app.use('/api/auth', mk(15 * 60 * 1000, 30));
+app.use('/api/auth/forgot', mk(15 * 60 * 1000, 5));
+app.use('/api/auth/reset', mk(15 * 60 * 1000, 10));
 app.use('/api/admin', mk(15 * 60 * 1000, 30));
 app.use('/api', mk(60 * 1000, 120));
 
