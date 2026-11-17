@@ -122,6 +122,7 @@ router.post('/gumroad-webhook', express.urlencoded({ extended: true, limit: '100
     }
 
     const { subscriber } = await gumroadGet('/subscribers/' + encodeURIComponent(subscriptionId));
+    console.log('Gumroad product_id:', subscriber && subscriber.product_id, '| فعّل GUMROAD_PRODUCT_ID:', !!process.env.GUMROAD_PRODUCT_ID);
     if (!subscriber || !productMatches(subscriber.product_id)) {
       console.warn('اشتراك ماشي ديال المنتج ديالنا، تجاهلناه');
       return res.status(200).send('OK');
