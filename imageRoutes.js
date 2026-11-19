@@ -1,6 +1,8 @@
 const express = require('express');
 const db = require('./database');
 const { requireAuth } = require('./authMiddleware');
+const crypto = require('crypto');
+const chatRouter = require('./chatRoutes');
 
 const router = express.Router();
 
@@ -72,6 +74,34 @@ function containsBlockedContent(text) {
   return BLOCKED_KEYWORDS.some(k => lower.includes(k));
 }
 
+
+// نماذج الصور كتفهم الإنجليزية مزيان؛ الوصف بالعربية/الفرنسية كيعطي صور ما عندها علاقة. كنترجمو الوصف قبل التوليد.
+const translationCache = new Map(); // hash -> Promise<string>
+const TRANSLATE_CACHE_MAX = 200;
+async function toEnglishPrompt(prompt) {
+  if (/^[\x00-\x7F]+$/.test(prompt)) return prompt; // إنجليزي/ASCII: ما كنترجموش
+  const key = crypto.createHash('sha256').update(prompt).digest('hex');
+  if (translationCache.has(key)) return translationCache.get(key);
+  const p = (async () => {
+    try {
+      const ask = chatRouter.askWithFailover;
+      if (typeof ask !== 'function') return prompt;
+      const instr = 'Translate the following image description into English for an AI image generator. ' +
+        'Output ONLY the English description (one short paragraph, no quotes, no notes). ' +
+        'Keep every detail; if the text is very short you may add a few concrete visual details (lighting, style).\n\n' +
+        'Description:\n' + prompt;
+      const r = await ask('openrouter/free', instr, 200);
+      const out = r && r.ok && r.text ? String(r.text).trim().replace(/^["'\s]+|["'\s]+$/g, '') : '';
+      if (out && out.length >= 3 && out.length <= 800) return out;
+    } catch (e) { console.warn('translate prompt failed:', e.message); }
+    return prompt;
+  })();
+  if (translationCache.size >= TRANSLATE_CACHE_MAX) translationCache.clear();
+  translationCache.set(key, p);
+  p.then((v) => { if (v === prompt) translationCache.delete(key); });
+  return p;
+}
+
 router.get('/models', (req, res) => {
   const list = Object.entries(MODELS).map(([key, val]) => ({
     key,
@@ -110,6 +140,11 @@ router.post('/generate', requireAuth, async (req, res) => {
     return res.status(400).json({ error: 'الوصف طويل بزاف (حد أقصى 500 حرف)' });
   }
   if (containsBlockedContent(prompt)) {
+    return res.status(400).json({ error: 'الوصف مخالف لسياسة الاستخدام' });
+  }
+
+  const englishPrompt = await toEnglishPrompt(prompt.trim());
+  if (englishPrompt !== prompt.trim() && containsBlockedContent(englishPrompt)) {
     return res.status(400).json({ error: 'الوصف مخالف لسياسة الاستخدام' });
   }
 
@@ -165,7 +200,7 @@ router.post('/generate', requireAuth, async (req, res) => {
         try {
           let response;
           if (candidate.provider === 'pollinations') {
-            const pollinationsUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}` +
+            const pollinationsUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(englishPrompt)}` +
               `?model=${encodeURIComponent(candidate.pollinationsModel)}&width=${w}&height=${h}` +
               `&seed=${Math.floor(Math.random() * 1e9)}&nologo=true`;
             const headers = { Referer: 'https://usequerymix.com/' };
@@ -173,7 +208,7 @@ router.post('/generate', requireAuth, async (req, res) => {
             response = await fetch(pollinationsUrl, { headers, signal: controller.signal });
           } else if (accountId && apiToken) {
             const cfUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${candidate.cfModel}`;
-            const body = candidate.params?.prompt ? { prompt } : { prompt, ...candidate.params };
+            const body = candidate.params?.prompt ? { prompt: englishPrompt } : { prompt: englishPrompt, ...candidate.params };
             response = await fetch(cfUrl, {
               method: 'POST',
               headers: { 'Authorization': `Bearer ${apiToken}`, 'Content-Type': 'application/json' },
@@ -189,10 +224,27 @@ router.post('/generate', requireAuth, async (req, res) => {
           }
           const declared = parseInt(response.headers.get('content-length') || '0', 10);
           if (declared > IMAGE_MAX_BYTES) { console.warn('image too large (declared)'); continue; }
-          const buf = await response.arrayBuffer();
+          const ctype = (response.headers.get('content-type') || '').toLowerCase();
+          let buf;
+          if (ctype.includes('application/json')) {
+            // Cloudflare FLUX كيرجع JSON: { result: { image: base64 } }
+            const j = await response.json();
+            const b64 = j && j.result && j.result.image;
+            if (!b64 || typeof b64 !== 'string') { console.warn(`Image model returned no image (${candidate.name})`); continue; }
+            buf = Buffer.from(b64, 'base64');
+          } else {
+            buf = Buffer.from(await response.arrayBuffer());
+          }
           if (buf.byteLength > IMAGE_MAX_BYTES) { console.warn('image too large'); continue; }
+          if (buf.byteLength < 1000) { console.warn(`image too small (${candidate.name})`); continue; }
+          // نوع الصورة كيتحدد من الـ magic bytes (ماشي من الـ header)
+          let outType = '';
+          if (buf[0] === 0x89 && buf[1] === 0x50) outType = 'image/png';
+          else if (buf[0] === 0xff && buf[1] === 0xd8) outType = 'image/jpeg';
+          else if (buf.slice(0, 4).toString() === 'RIFF') outType = 'image/webp';
+          else { console.warn(`Not an image (${candidate.name}, ${ctype})`); continue; }
           arrayBuffer = buf;
-          imageContentType = response.headers.get('content-type') || imageContentType;
+          imageContentType = outType;
           usedModel = candidate;
           break;
         } catch (e) {
