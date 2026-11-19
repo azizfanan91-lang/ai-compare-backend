@@ -78,7 +78,7 @@ function containsBlockedContent(text) {
 // نماذج الصور كتفهم الإنجليزية مزيان؛ الوصف بالعربية/الفرنسية كيعطي صور ما عندها علاقة. كنترجمو الوصف قبل التوليد.
 const translationCache = new Map(); // hash -> Promise<string>
 const TRANSLATE_CACHE_MAX = 200;
-const TRANSLATE_TIMEOUT_MS = 6000;
+const TRANSLATE_TIMEOUT_MS = 5000;
 async function toEnglishPrompt(prompt) {
   if (/^[\x00-\x7F]+$/.test(prompt)) return prompt; // إنجليزي/ASCII: ما كنترجموش
   const key = crypto.createHash('sha256').update(prompt).digest('hex');
@@ -97,6 +97,18 @@ async function toEnglishPrompt(prompt) {
         new Promise((resolve) => setTimeout(() => resolve(null), TRANSLATE_TIMEOUT_MS))
       ]);
       const out = r && r.ok && r.text ? String(r.text).trim().replace(/^["'\s]+|["'\s]+$/g, '') : '';
+      if (out && out.length >= 3 && out.length <= 800) return out;
+      // مترجم احتياطي مجاني
+      try {
+        const ctl = new AbortController();
+        const tm = setTimeout(() => ctl.abort(), 5000);
+        const rr = await fetch('https://text.pollinations.ai/' + encodeURIComponent(instr) + '?model=openai-fast', { signal: ctl.signal }).finally(() => clearTimeout(tm));
+        if (rr.ok) {
+          const t2 = (await rr.text()).trim().replace(/^["'\s]+|["'\s]+$/g, '');
+          if (t2 && t2.length >= 3 && t2.length <= 800 && !/^\s*[{<]/.test(t2)) return t2;
+        }
+      } catch (e2) { console.warn('fallback translate failed:', e2.name === 'AbortError' ? 'timeout' : e2.message); }
+      console.warn('translate: no English translation, using original prompt');
       if (out && out.length >= 3 && out.length <= 800) return out;
     } catch (e) { console.warn('translate prompt failed:', e.message); }
     return prompt;
@@ -149,6 +161,7 @@ router.post('/generate', requireAuth, async (req, res) => {
   }
 
   const englishPrompt = await toEnglishPrompt(prompt.trim());
+  console.log('[image] prompt sent:', englishPrompt.slice(0, 150));
   if (englishPrompt !== prompt.trim() && containsBlockedContent(englishPrompt)) {
     return res.status(400).json({ error: 'الوصف مخالف لسياسة الاستخدام' });
   }
@@ -273,6 +286,7 @@ router.post('/generate', requireAuth, async (req, res) => {
     res.json({
       image: dataUri,
       model: usedModel.name,
+      prompt_used: englishPrompt,
       remaining: Math.max(0, imageLimit - used),
       limit: imageLimit
     });
