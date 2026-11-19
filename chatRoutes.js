@@ -370,3 +370,4 @@ router.post('/chat', requireAuth, async (req, res) => {
 });
 
 module.exports = router;
+module.exports.askWithFailover = askWithFailover; // يستعملو imageRoutes لترجمة الوصف
