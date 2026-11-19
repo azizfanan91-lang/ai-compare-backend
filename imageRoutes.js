@@ -78,6 +78,7 @@ function containsBlockedContent(text) {
 // نماذج الصور كتفهم الإنجليزية مزيان؛ الوصف بالعربية/الفرنسية كيعطي صور ما عندها علاقة. كنترجمو الوصف قبل التوليد.
 const translationCache = new Map(); // hash -> Promise<string>
 const TRANSLATE_CACHE_MAX = 200;
+const TRANSLATE_TIMEOUT_MS = 6000;
 async function toEnglishPrompt(prompt) {
   if (/^[\x00-\x7F]+$/.test(prompt)) return prompt; // إنجليزي/ASCII: ما كنترجموش
   const key = crypto.createHash('sha256').update(prompt).digest('hex');
@@ -90,7 +91,11 @@ async function toEnglishPrompt(prompt) {
         'Output ONLY the English description (one short paragraph, no quotes, no notes). ' +
         'Keep every detail; if the text is very short you may add a few concrete visual details (lighting, style).\n\n' +
         'Description:\n' + prompt;
-      const r = await ask('openrouter/free', instr, 200);
+      // سقف 6 ثواني: إلا تأخرات الترجمة كنكملو بالوصف الأصلي (السرعة أهم)
+      const r = await Promise.race([
+        ask('openrouter/free', instr, 200),
+        new Promise((resolve) => setTimeout(() => resolve(null), TRANSLATE_TIMEOUT_MS))
+      ]);
       const out = r && r.ok && r.text ? String(r.text).trim().replace(/^["'\s]+|["'\s]+$/g, '') : '';
       if (out && out.length >= 3 && out.length <= 800) return out;
     } catch (e) { console.warn('translate prompt failed:', e.message); }
