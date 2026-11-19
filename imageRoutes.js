@@ -25,6 +25,18 @@ const MODELS = {
     cfModel: '@cf/lykon/dreamshaper-8-lcm',
     params: { num_steps: 8 }
   },
+  'hf-flux': {
+    name: 'FLUX (Hugging Face)',
+    description: 'مجاني عبر Hugging Face',
+    provider: 'huggingface',
+    hfModel: 'black-forest-labs/FLUX.1-schnell'
+  },
+  'hf-sdxl': {
+    name: 'SDXL (Hugging Face)',
+    description: 'مجاني عبر Hugging Face',
+    provider: 'huggingface',
+    hfModel: 'stabilityai/stable-diffusion-xl-base-1.0'
+  },
   'pollinations-flux': {
     name: 'Flux (Free)',
     description: 'بديل مجاني سريع',
@@ -78,44 +90,56 @@ function containsBlockedContent(text) {
 // نماذج الصور كتفهم الإنجليزية مزيان؛ الوصف بالعربية/الفرنسية كيعطي صور ما عندها علاقة. كنترجمو الوصف قبل التوليد.
 const translationCache = new Map(); // hash -> Promise<string>
 const TRANSLATE_CACHE_MAX = 200;
-const TRANSLATE_TIMEOUT_MS = 5000;
+const TRANSLATE_TIMEOUT_MS = 10000;
 async function toEnglishPrompt(prompt) {
   if (/^[\x00-\x7F]+$/.test(prompt)) return prompt; // إنجليزي/ASCII: ما كنترجموش
   const key = crypto.createHash('sha256').update(prompt).digest('hex');
   if (translationCache.has(key)) return translationCache.get(key);
-  const p = (async () => {
+
+  const clean = (t) => {
+    const out = String(t || '').trim().replace(/^["'\s]+|["'\s]+$/g, '');
+    return out.length >= 3 && out.length <= 800 && !/^\s*[{<]/.test(out) ? out : '';
+  };
+  const instr = 'Translate the following image description into English for an AI image generator. ' +
+    'Output ONLY the English description (one short paragraph, no quotes, no notes). ' +
+    'Keep every detail; if the text is very short you may add a few concrete visual details (lighting, style).\n\n' +
+    'Description:\n' + prompt;
+
+  // مترجمين فـ نفس الوقت: أول واحد كيرجع ترجمة صالحة كيربح (كيخفف التأخير)
+  const viaChat = async () => {
+    const ask = chatRouter.askWithFailover;
+    if (typeof ask !== 'function') throw new Error('no chat');
+    const r = await ask('openrouter/free', instr, 200);
+    const out = r && r.ok ? clean(r.text) : '';
+    if (!out) throw new Error('chat: empty');
+    return out;
+  };
+  const viaPollinations = async () => {
+    const ctl = new AbortController();
+    const tm = setTimeout(() => ctl.abort(), TRANSLATE_TIMEOUT_MS);
     try {
-      const ask = chatRouter.askWithFailover;
-      if (typeof ask !== 'function') return prompt;
-      const instr = 'Translate the following image description into English for an AI image generator. ' +
-        'Output ONLY the English description (one short paragraph, no quotes, no notes). ' +
-        'Keep every detail; if the text is very short you may add a few concrete visual details (lighting, style).\n\n' +
-        'Description:\n' + prompt;
-      // سقف 6 ثواني: إلا تأخرات الترجمة كنكملو بالوصف الأصلي (السرعة أهم)
-      const r = await Promise.race([
-        ask('openrouter/free', instr, 200),
-        new Promise((resolve) => setTimeout(() => resolve(null), TRANSLATE_TIMEOUT_MS))
-      ]);
-      const out = r && r.ok && r.text ? String(r.text).trim().replace(/^["'\s]+|["'\s]+$/g, '') : '';
-      if (out && out.length >= 3 && out.length <= 800) return out;
-      // مترجم احتياطي مجاني
-      try {
-        const ctl = new AbortController();
-        const tm = setTimeout(() => ctl.abort(), 5000);
-        const rr = await fetch('https://text.pollinations.ai/' + encodeURIComponent(instr) + '?model=openai-fast', { signal: ctl.signal }).finally(() => clearTimeout(tm));
-        if (rr.ok) {
-          const t2 = (await rr.text()).trim().replace(/^["'\s]+|["'\s]+$/g, '');
-          if (t2 && t2.length >= 3 && t2.length <= 800 && !/^\s*[{<]/.test(t2)) return t2;
-        }
-      } catch (e2) { console.warn('fallback translate failed:', e2.name === 'AbortError' ? 'timeout' : e2.message); }
-      console.warn('translate: no English translation, using original prompt');
-      if (out && out.length >= 3 && out.length <= 800) return out;
-    } catch (e) { console.warn('translate prompt failed:', e.message); }
+      const rr = await fetch('https://text.pollinations.ai/' + encodeURIComponent(instr) + '?model=openai-fast', { signal: ctl.signal });
+      if (!rr.ok) throw new Error('pollinations HTTP ' + rr.status);
+      const out = clean(await rr.text());
+      if (!out) throw new Error('pollinations: empty');
+      return out;
+    } finally { clearTimeout(tm); }
+  };
+  const anyOf = (fns) => new Promise((resolve, reject) => {
+    let failed = 0;
+    fns.forEach((fn) => fn().then(resolve, (e) => { console.warn('translate attempt failed:', e.message); if (++failed === fns.length) reject(e); }));
+  });
+
+  const p = Promise.race([
+    anyOf([viaChat, viaPollinations]),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('translate timeout')), TRANSLATE_TIMEOUT_MS))
+  ]).catch((e) => {
+    console.warn('translate: using original prompt (' + e.message + ')');
+    translationCache.delete(key);
     return prompt;
-  })();
+  });
   if (translationCache.size >= TRANSLATE_CACHE_MAX) translationCache.clear();
   translationCache.set(key, p);
-  p.then((v) => { if (v === prompt) translationCache.delete(key); });
   return p;
 }
 
@@ -224,6 +248,14 @@ router.post('/generate', requireAuth, async (req, res) => {
             const headers = { Referer: 'https://usequerymix.com/' };
             if (process.env.POLLINATIONS_TOKEN) headers.Authorization = `Bearer ${process.env.POLLINATIONS_TOKEN}`;
             response = await fetch(pollinationsUrl, { headers, signal: controller.signal });
+          } else if (candidate.provider === 'huggingface') {
+            if (!process.env.HF_TOKEN) continue; // بلا توكن: نتخطاو هاد المزود
+            response = await fetch(`https://router.huggingface.co/hf-inference/models/${candidate.hfModel}`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${process.env.HF_TOKEN}`, 'Content-Type': 'application/json', Accept: 'image/png' },
+              body: JSON.stringify({ inputs: englishPrompt, parameters: { width: Math.min(w, 1024), height: Math.min(h, 1024) } }),
+              signal: controller.signal
+            });
           } else if (accountId && apiToken) {
             const cfUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${candidate.cfModel}`;
             const body = candidate.params?.prompt ? { prompt: englishPrompt } : { prompt: englishPrompt, ...candidate.params };
