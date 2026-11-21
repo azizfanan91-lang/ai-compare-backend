@@ -13,12 +13,6 @@ const MODELS = {
     cfModel: '@cf/black-forest-labs/flux-1-schnell',
     params: { prompt: true } // FLUX يقبل prompt فقط
   },
-  sdxl: {
-    name: 'Stable Diffusion XL',
-    description: 'تفاصيل دقيقة',
-    cfModel: '@cf/stabilityai/stable-diffusion-xl-base-1.0',
-    params: { num_steps: 20 }
-  },
   dreamshaper: {
     name: 'DreamShaper',
     description: 'إبداعي وسلس',
@@ -76,6 +70,7 @@ function containsBlockedContent(text) {
 
 
 // نماذج الصور كتفهم الإنجليزية مزيان؛ الوصف بالعربية/الفرنسية كيعطي صور ما عندها علاقة. كنترجمو الوصف قبل التوليد.
+const deadModels = new Set(); // نماذج رجعات 410 (محيّدة من المزود): كنتخطاوها حتى يتعاود تشغيل السيرفر
 const translationCache = new Map(); // hash -> Promise<string>
 const TRANSLATE_CACHE_MAX = 200;
 const TRANSLATE_TIMEOUT_MS = 10000;
@@ -90,7 +85,8 @@ async function toEnglishPrompt(prompt) {
   };
   const instr = 'Translate the following image description into English for an AI image generator. ' +
     'Output ONLY the English description (one short paragraph, no quotes, no notes). ' +
-    'Keep every detail; if the text is very short you may add a few concrete visual details (lighting, style).\n\n' +
+    'Translate faithfully and keep it short. Do NOT add details about people (skin, body, clothing, age) or anything not in the text. ' +
+    'Never use words like nude, sexy, erotic, realistic skin.\n\n' +
     'Description:\n' + prompt;
 
   // مترجمين فـ نفس الوقت: أول واحد كيرجع ترجمة صالحة كيربح (كيخفف التأخير)
@@ -132,7 +128,7 @@ async function toEnglishPrompt(prompt) {
 }
 
 router.get('/models', (req, res) => {
-  const list = Object.entries(MODELS).map(([key, val]) => ({
+  const list = Object.entries(MODELS).filter(([, val]) => !deadModels.has(val.name)).map(([key, val]) => ({
     key,
     name: val.name,
     description: val.description
@@ -184,11 +180,11 @@ router.post('/generate', requireAuth, async (req, res) => {
   const selectedModel = MODELS[modelKey] || MODELS.flux;
   // ترتيب الاحتياط
   const fallbackOrder = [
-    MODELS['pollinations-flux'], MODELS.flux, MODELS.sdxl,
+    MODELS['pollinations-flux'], MODELS.flux,
     ...Object.values(MODELS)
   ];
   const imageCandidates = [selectedModel, ...fallbackOrder]
-    .filter((value, index, list) => value && list.indexOf(value) === index);
+    .filter((value, index, list) => value && list.indexOf(value) === index && !deadModels.has(value.name));
 
   try {
     const today = new Date().toISOString().split('T')[0];
@@ -265,6 +261,7 @@ router.post('/generate', requireAuth, async (req, res) => {
             let detail = '';
             try { detail = (await response.text()).replace(/\s+/g, ' ').slice(0, 300); } catch (e) {}
             console.warn(`Image model failed (${candidate.name}): HTTP ${response.status} ${detail}`);
+            if (response.status === 410) deadModels.add(candidate.name);
             continue;
           }
           const declared = parseInt(response.headers.get('content-length') || '0', 10);
