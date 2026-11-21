@@ -74,7 +74,7 @@ const { FREE_IMAGE_DAILY_LIMIT, PREMIUM_IMAGE_DAILY_LIMIT } = require('./usageLi
 const IMAGE_TOTAL_BUDGET_MS = 80000;      // الفرونت كيوقف الطلب عند 90 ثانية
 const IMAGE_ATTEMPT_TIMEOUT_MS = 35000;
 const IMAGE_MAX_BYTES = 6 * 1024 * 1024;  // سقف حجم الصورة المقبولة
-const MAX_FALLBACKS = 2;                  // ما كنجربوش جميع النماذج
+const MAX_FALLBACKS = 3;                  // ما كنجربوش جميع النماذج
 
 const BLOCKED_KEYWORDS = [
   'child', 'kid', 'minor', 'طفل', 'أطفال',
@@ -194,7 +194,13 @@ router.post('/generate', requireAuth, async (req, res) => {
   const apiToken = process.env.CLOUDFLARE_API_TOKEN;
 
   const selectedModel = MODELS[modelKey] || MODELS.flux;
-  const imageCandidates = [selectedModel, ...Object.values(MODELS)]
+  // الاحتياط: نبدلو بـ المزودين اللي كيخدمو (Hugging Face إلا كاين التوكن) قبل المزودين اللي كيفشلو بزاف
+  const fallbackOrder = [
+    ...(process.env.HF_TOKEN ? [MODELS['hf-flux'], MODELS['hf-sdxl']] : []),
+    MODELS['pollinations-flux'], MODELS.flux, MODELS.sdxl,
+    ...Object.values(MODELS)
+  ];
+  const imageCandidates = [selectedModel, ...fallbackOrder]
     .filter((value, index, list) => value && list.indexOf(value) === index);
 
   try {
