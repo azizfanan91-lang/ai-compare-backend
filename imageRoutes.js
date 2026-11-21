@@ -25,18 +25,6 @@ const MODELS = {
     cfModel: '@cf/lykon/dreamshaper-8-lcm',
     params: { num_steps: 8 }
   },
-  'hf-flux': {
-    name: 'FLUX (Hugging Face)',
-    description: 'مجاني عبر Hugging Face',
-    provider: 'huggingface',
-    hfModel: 'black-forest-labs/FLUX.1-schnell'
-  },
-  'hf-sdxl': {
-    name: 'SDXL (Hugging Face)',
-    description: 'مجاني عبر Hugging Face',
-    provider: 'huggingface',
-    hfModel: 'stabilityai/stable-diffusion-xl-base-1.0'
-  },
   'pollinations-flux': {
     name: 'Flux (Free)',
     description: 'بديل مجاني سريع',
@@ -194,9 +182,8 @@ router.post('/generate', requireAuth, async (req, res) => {
   const apiToken = process.env.CLOUDFLARE_API_TOKEN;
 
   const selectedModel = MODELS[modelKey] || MODELS.flux;
-  // الاحتياط: نبدلو بـ المزودين اللي كيخدمو (Hugging Face إلا كاين التوكن) قبل المزودين اللي كيفشلو بزاف
+  // ترتيب الاحتياط
   const fallbackOrder = [
-    ...(process.env.HF_TOKEN ? [MODELS['hf-flux'], MODELS['hf-sdxl']] : []),
     MODELS['pollinations-flux'], MODELS.flux, MODELS.sdxl,
     ...Object.values(MODELS)
   ];
@@ -275,7 +262,9 @@ router.post('/generate', requireAuth, async (req, res) => {
             continue;
           }
           if (!response.ok) {
-            console.warn(`Image model failed (${candidate.name}): HTTP ${response.status}`);
+            let detail = '';
+            try { detail = (await response.text()).replace(/\s+/g, ' ').slice(0, 300); } catch (e) {}
+            console.warn(`Image model failed (${candidate.name}): HTTP ${response.status} ${detail}`);
             continue;
           }
           const declared = parseInt(response.headers.get('content-length') || '0', 10);
