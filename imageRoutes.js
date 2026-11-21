@@ -13,6 +13,19 @@ const MODELS = {
     cfModel: '@cf/black-forest-labs/flux-1-schnell',
     params: { prompt: true } // FLUX يقبل prompt فقط
   },
+  lucid: {
+    name: 'Lucid Origin',
+    description: 'جودة عالية وألوان طبيعية',
+    cfModel: '@cf/leonardo/lucid-origin',
+    params: { steps: 8, width: 1024, height: 1024 }
+  },
+  klein: {
+    name: 'FLUX.2 Klein',
+    description: 'جيل جديد من FLUX',
+    cfModel: '@cf/black-forest-labs/flux-2-klein-4b',
+    multipart: true,
+    params: {}
+  },
   dreamshaper: {
     name: 'DreamShaper',
     description: 'إبداعي وسلس',
@@ -180,7 +193,7 @@ router.post('/generate', requireAuth, async (req, res) => {
   const selectedModel = MODELS[modelKey] || MODELS.flux;
   // ترتيب الاحتياط
   const fallbackOrder = [
-    MODELS['pollinations-flux'], MODELS.flux,
+    MODELS.flux, MODELS.klein, MODELS.lucid, MODELS['pollinations-flux'],
     ...Object.values(MODELS)
   ];
   const imageCandidates = [selectedModel, ...fallbackOrder]
@@ -247,13 +260,27 @@ router.post('/generate', requireAuth, async (req, res) => {
             });
           } else if (accountId && apiToken) {
             const cfUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${candidate.cfModel}`;
-            const body = candidate.params?.prompt ? { prompt: englishPrompt } : { prompt: englishPrompt, ...candidate.params };
-            response = await fetch(cfUrl, {
-              method: 'POST',
-              headers: { 'Authorization': `Bearer ${apiToken}`, 'Content-Type': 'application/json' },
-              body: JSON.stringify(body),
-              signal: controller.signal
-            });
+            if (candidate.multipart) {
+              // FLUX.2 Klein كيقبل multipart/form-data فقط
+              const form = new FormData();
+              form.append('prompt', englishPrompt);
+              form.append('width', String(Math.min(w, 1024)));
+              form.append('height', String(Math.min(h, 1024)));
+              response = await fetch(cfUrl, {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${apiToken}` },
+                body: form,
+                signal: controller.signal
+              });
+            } else {
+              const body = candidate.params?.prompt ? { prompt: englishPrompt } : { prompt: englishPrompt, ...candidate.params };
+              response = await fetch(cfUrl, {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${apiToken}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+                signal: controller.signal
+              });
+            }
           } else {
             continue;
           }
