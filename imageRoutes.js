@@ -11,56 +11,66 @@ const MODELS = {
     name: 'FLUX.1 Schnell',
     description: 'سريع وجودة عالية',
     cfModel: '@cf/black-forest-labs/flux-1-schnell',
+    supportsDimensions: false, // مؤكد: كنبعتو prompt فقط، ما نعلنوش دعم النسب حتى نتأكدو
     params: { prompt: true } // FLUX يقبل prompt فقط
   },
   lucid: {
     name: 'Lucid Origin',
     description: 'جودة عالية وألوان طبيعية',
     cfModel: '@cf/leonardo/lucid-origin',
-    params: { steps: 8, width: 1024, height: 1024 }
+    supportsDimensions: true,
+    sendsSize: true, // width/height كيتبعتو فـ الجسم (مقيّدين بـ 1024)
+    params: { steps: 8 }
   },
   klein: {
     name: 'FLUX.2 Klein',
     description: 'جيل جديد من FLUX',
     cfModel: '@cf/black-forest-labs/flux-2-klein-4b',
     multipart: true,
+    supportsDimensions: true, // multipart: width/height (مقيّدين بـ 1024)
     params: {}
   },
   dreamshaper: {
     name: 'DreamShaper',
     description: 'إبداعي وسلس',
     cfModel: '@cf/lykon/dreamshaper-8-lcm',
+    supportsDimensions: false, // كنبعتو prompt + num_steps فقط
     params: { num_steps: 8 }
   },
   'pollinations-flux': {
     name: 'Flux (Free)',
     description: 'بديل مجاني سريع',
     provider: 'pollinations',
-    pollinationsModel: 'flux'
+    pollinationsModel: 'flux',
+    supportsDimensions: true
   },
   zimage: {
     name: 'Z-Image Turbo',
     description: 'سريع ومجاني',
     provider: 'pollinations',
-    pollinationsModel: 'z-image'
+    pollinationsModel: 'z-image',
+    supportsDimensions: true
   },
   sana: {
     name: 'Sana',
     description: 'إبداعي ومجاني',
     provider: 'pollinations',
-    pollinationsModel: 'sana'
+    pollinationsModel: 'sana',
+    supportsDimensions: true
   },
   'flux-klein': {
     name: 'FLUX Klein',
     description: 'خفيف وسريع',
     provider: 'pollinations',
-    pollinationsModel: 'flux-klein'
+    pollinationsModel: 'flux-klein',
+    supportsDimensions: true
   },
   'sdxl-lightning': {
     name: 'SDXL Lightning',
     description: 'سريع بجودة جيدة',
     provider: 'pollinations',
-    pollinationsModel: 'sdxl-lightning-free'
+    pollinationsModel: 'sdxl-lightning-free',
+    supportsDimensions: true
   }
 };
 
@@ -144,7 +154,8 @@ router.get('/models', (req, res) => {
   const list = Object.entries(MODELS).filter(([, val]) => !deadModels.has(val.name)).map(([key, val]) => ({
     key,
     name: val.name,
-    description: val.description
+    description: val.description,
+    supports_dimensions: !!val.supportsDimensions
   }));
   res.json({ models: list });
 });
@@ -273,7 +284,8 @@ router.post('/generate', requireAuth, async (req, res) => {
                 signal: controller.signal
               });
             } else {
-              const body = candidate.params?.prompt ? { prompt: englishPrompt } : { prompt: englishPrompt, ...candidate.params };
+              let body = candidate.params?.prompt ? { prompt: englishPrompt } : { prompt: englishPrompt, ...candidate.params };
+              if (candidate.sendsSize) body = { ...body, width: Math.min(w, 1024), height: Math.min(h, 1024) };
               response = await fetch(cfUrl, {
                 method: 'POST',
                 headers: { 'Authorization': `Bearer ${apiToken}`, 'Content-Type': 'application/json' },
@@ -337,6 +349,10 @@ router.post('/generate', requireAuth, async (req, res) => {
     res.json({
       image: dataUri,
       model: usedModel.name,
+      model_requested: selectedModel.name,
+      fallback_used: usedModel !== selectedModel,
+      dimensions_requested: { width: w, height: h },
+      dimensions_applied: !!usedModel.supportsDimensions,
       prompt_used: englishPrompt,
       remaining: Math.max(0, imageLimit - used),
       limit: imageLimit
